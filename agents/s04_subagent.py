@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-s04_subagent.py - Subagents
+s04_subagent.py - Subagents (OpenAI/千问版本)
 
-Spawn a child agent with fresh messages=[]. The child works in its own
-context, sharing the filesystem, then returns only a summary to the parent.
+生成一个带有全新 messages=[] 的子智能体。子智能体在自己的上下文中工作，
+共享文件系统，然后只向父智能体返回一个总结。
 
     Parent agent                     Subagent
     +------------------+             +------------------+
@@ -11,45 +11,51 @@ context, sharing the filesystem, then returns only a summary to the parent.
     |                  |  dispatch   |                  |
     | tool: task       | ---------->| while tool_use:  |
     |   prompt="..."   |            |   call tools     |
-    |   description="" |            |   append results |
+    |   description=""  |            |   append results |
     |                  |  summary   |                  |
-    |   result = "..." | <--------- | return last text |
+    |   result = "..." | <--------- | return last text  |
     +------------------+             +------------------+
               |
     Parent context stays clean.
     Subagent context is discarded.
 
-Key insight: "Process isolation gives context isolation for free."
+核心洞见: "进程隔离让上下文隔离免费实现。"
 """
 
 import os
 import subprocess
+import json
 from pathlib import Path
 
-from anthropic import Anthropic
+from openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
-if os.getenv("ANTHROPIC_BASE_URL"):
-    os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
-
 WORKDIR = Path.cwd()
-client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
-MODEL = os.environ["MODEL_ID"]
 
-SYSTEM = f"You are a coding agent at {WORKDIR}. Use the task tool to delegate exploration or subtasks."
-SUBAGENT_SYSTEM = f"You are a coding subagent at {WORKDIR}. Complete the given task, then summarize your findings."
+# OpenAI 兼容的 API 配置，用于接入通义千问 (Qwen)
+client = OpenAI(
+    api_key=os.getenv("DASHSCOPE_API_KEY"),
+    base_url=os.getenv("OPENAI_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+)
+MODEL = os.environ.get("MODEL_ID", "qwen-max")
+
+SYSTEM = "You are a coding agent at {WORKDIR}. Use the task tool to delegate exploration or subtasks."
+SUBAGENT_SYSTEM = "You are a coding subagent at {WORKDIR}. Complete the given task, then summarize your findings."
 
 
-# -- Tool implementations shared by parent and child --
+# -- 工具实现，父和子智能体共享 --
 def safe_path(p: str) -> Path:
+    """确保路径不会逃逸出工作目录"""
     path = (WORKDIR / p).resolve()
     if not path.is_relative_to(WORKDIR):
         raise ValueError(f"Path escapes workspace: {p}")
     return path
 
+
 def run_bash(command: str) -> str:
+    """执行 bash 命令"""
     dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
     if any(d in command for d in dangerous):
         return "Error: Dangerous command blocked"
@@ -61,7 +67,9 @@ def run_bash(command: str) -> str:
     except subprocess.TimeoutExpired:
         return "Error: Timeout (120s)"
 
+
 def run_read(path: str, limit: int = None) -> str:
+    """读取文件内容"""
     try:
         lines = safe_path(path).read_text().splitlines()
         if limit and limit < len(lines):
@@ -70,7 +78,9 @@ def run_read(path: str, limit: int = None) -> str:
     except Exception as e:
         return f"Error: {e}"
 
+
 def run_write(path: str, content: str) -> str:
+    """写入文件"""
     try:
         fp = safe_path(path)
         fp.parent.mkdir(parents=True, exist_ok=True)
@@ -79,7 +89,9 @@ def run_write(path: str, content: str) -> str:
     except Exception as e:
         return f"Error: {e}"
 
+
 def run_edit(path: str, old_text: str, new_text: str) -> str:
+    """编辑文件（替换文本）"""
     try:
         fp = safe_path(path)
         content = fp.read_text()
@@ -91,6 +103,7 @@ def run_edit(path: str, old_text: str, new_text: str) -> str:
         return f"Error: {e}"
 
 
+# -- 工具分发器 --
 TOOL_HANDLERS = {
     "bash":       lambda **kw: run_bash(kw["command"]),
     "read_file":  lambda **kw: run_read(kw["path"], kw.get("limit")),
@@ -98,70 +111,191 @@ TOOL_HANDLERS = {
     "edit_file":  lambda **kw: run_edit(kw["path"], kw["old_text"], kw["new_text"]),
 }
 
-# Child gets all base tools except task (no recursive spawning)
+# 子智能体工具列表：不包含 task（避免递归生成）
 CHILD_TOOLS = [
-    {"name": "bash", "description": "Run a shell command.",
-     "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
-    {"name": "read_file", "description": "Read file contents.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["path"]}},
-    {"name": "write_file", "description": "Write content to file.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}},
-    {"name": "edit_file", "description": "Replace exact text in file.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}},
+    {
+        "type": "function",
+        "function": {
+            "name": "bash",
+            "description": "Run a shell command.",
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+            },
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read file contents.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "limit": {"type": "integer"}
+                },
+                "required": ["path"],
+            },
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "Write content to file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string"}
+                },
+                "required": ["path", "content"],
+            },
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_file",
+            "description": "Replace exact text in file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "old_text": {"type": "string"},
+                    "new_text": {"type": "string"}
+                },
+                "required": ["path", "old_text", "new_text"],
+            },
+        }
+    },
 ]
 
 
-# -- Subagent: fresh context, filtered tools, summary-only return --
+# -- 子智能体: 全新上下文，受限工具，只返回总结 --
 def run_subagent(prompt: str) -> str:
+    """
+    运行子智能体执行任务。
+    
+    关键设计:
+    - 全新 messages=[] 上下文，与父智能体隔离
+    - 不包含 task 工具，避免递归生成
+    - 只返回最终总结，子智能体的上下文被丢弃
+    """
     sub_messages = [{"role": "user", "content": prompt}]  # fresh context
+    
     for _ in range(30):  # safety limit
-        response = client.messages.create(
-            model=MODEL, system=SUBAGENT_SYSTEM, messages=sub_messages,
-            tools=CHILD_TOOLS, max_tokens=8000,
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "system", "content": SUBAGENT_SYSTEM}] + sub_messages,
+            tools=CHILD_TOOLS,
+            max_tokens=8000,
         )
-        sub_messages.append({"role": "assistant", "content": response.content})
-        if response.stop_reason != "tool_use":
+
+        choice = response.choices[0]
+        
+        # 构建 assistant 消息
+        assistant_message = {
+            "role": "assistant",
+            "content": choice.message.content,
+        }
+        if choice.message.tool_calls:
+            assistant_message["tool_calls"] = choice.message.tool_calls
+        sub_messages.append(assistant_message)
+
+        if choice.finish_reason != "tool_calls":
             break
-        results = []
-        for block in response.content:
-            if block.type == "tool_use":
-                handler = TOOL_HANDLERS.get(block.name)
-                output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
-                results.append({"type": "tool_result", "tool_use_id": block.id, "content": str(output)[:50000]})
-        sub_messages.append({"role": "user", "content": results})
-    # Only the final text returns to the parent -- child context is discarded
-    return "".join(b.text for b in response.content if hasattr(b, "text")) or "(no summary)"
+
+        # 执行工具调用
+        tool_results = []
+        for tool_call in choice.message.tool_calls:
+            function_name = tool_call.function.name
+            arguments = json.loads(tool_call.function.arguments)
+
+            handler = TOOL_HANDLERS.get(function_name)
+            output = handler(**arguments) if handler else f"Unknown tool: {function_name}"
+            
+            tool_results.append({
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": str(output)[:50000]
+            })
+
+        sub_messages.extend(tool_results)
+
+    # 只有最终文本返回给父智能体 -- 子智能体上下文被丢弃
+    final_content = choice.message.content
+    return final_content if final_content else "(no summary)"
 
 
-# -- Parent tools: base tools + task dispatcher --
+# -- 父智能体工具: 基础工具 + task 分发器 --
 PARENT_TOOLS = CHILD_TOOLS + [
-    {"name": "task", "description": "Spawn a subagent with fresh context. It shares the filesystem but not conversation history.",
-     "input_schema": {"type": "object", "properties": {"prompt": {"type": "string"}, "description": {"type": "string", "description": "Short description of the task"}}, "required": ["prompt"]}},
+    {
+        "type": "function",
+        "function": {
+            "name": "task",
+            "description": "Spawn a subagent with fresh context. It shares the filesystem but not conversation history.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string"},
+                    "description": {"type": "string", "description": "Short description of the task"}
+                },
+                "required": ["prompt"],
+            },
+        }
+    },
 ]
 
 
 def agent_loop(messages: list):
+    """父智能体循环"""
     while True:
-        response = client.messages.create(
-            model=MODEL, system=SYSTEM, messages=messages,
-            tools=PARENT_TOOLS, max_tokens=8000,
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "system", "content": SYSTEM}] + messages,
+            tools=PARENT_TOOLS,
+            max_tokens=8000,
         )
-        messages.append({"role": "assistant", "content": response.content})
-        if response.stop_reason != "tool_use":
+
+        choice = response.choices[0]
+        
+        # 构建 assistant 消息
+        assistant_message = {
+            "role": "assistant",
+            "content": choice.message.content,
+        }
+        if choice.message.tool_calls:
+            assistant_message["tool_calls"] = choice.message.tool_calls
+        messages.append(assistant_message)
+
+        if choice.finish_reason != "tool_calls":
             return
+
         results = []
-        for block in response.content:
-            if block.type == "tool_use":
-                if block.name == "task":
-                    desc = block.input.get("description", "subtask")
-                    print(f"> task ({desc}): {block.input['prompt'][:80]}")
-                    output = run_subagent(block.input["prompt"])
-                else:
-                    handler = TOOL_HANDLERS.get(block.name)
-                    output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
-                print(f"  {str(output)[:200]}")
-                results.append({"type": "tool_result", "tool_use_id": block.id, "content": str(output)})
-        messages.append({"role": "user", "content": results})
+        for tool_call in choice.message.tool_calls:
+            function_name = tool_call.function.name
+            arguments = json.loads(tool_call.function.arguments)
+
+            if function_name == "task":
+                desc = arguments.get("description", "subtask")
+                print(f"\033[33m> task ({desc}): {arguments['prompt'][:80]}\033[0m")
+                output = run_subagent(arguments["prompt"])
+            else:
+                handler = TOOL_HANDLERS.get(function_name)
+                output = handler(**arguments) if handler else f"Unknown tool: {function_name}"
+            
+            print(f"  {str(output[:200])}")
+            
+            results.append({
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": str(output)
+            })
+
+        messages.extend(results)
 
 
 if __name__ == "__main__":
@@ -175,9 +309,7 @@ if __name__ == "__main__":
             break
         history.append({"role": "user", "content": query})
         agent_loop(history)
-        response_content = history[-1]["content"]
-        if isinstance(response_content, list):
-            for block in response_content:
-                if hasattr(block, "text"):
-                    print(block.text)
+        response_content = history[-1].get("content", "")
+        if response_content:
+            print(response_content)
         print()
