@@ -53,8 +53,17 @@ def _loop(self, name, role, prompt):
         # -- WORK PHASE --
         messages = [{"role": "user", "content": prompt}]
         for _ in range(50):
-            response = client.messages.create(...)
-            if response.stop_reason != "tool_use":
+            response = client.chat.completions.create(
+                model=MODEL,
+                messages=[{"role": "system", "content": TEAMMATE_SYSTEM}] + messages,
+                tools=TOOLS,
+            )
+            choice = response.choices[0]
+            assistant_message = {"role": "assistant", "content": choice.message.content}
+            if choice.message.tool_calls:
+                assistant_message["tool_calls"] = choice.message.tool_calls
+            messages.append(assistant_message)
+            if choice.finish_reason != "tool_calls":
                 break
             # execute tools...
             if idle_requested:

@@ -61,16 +61,16 @@ TOOL_HANDLERS = {
 3. In the loop, look up the handler by name. The loop body itself is unchanged from s01.
 
 ```python
-for block in response.content:
-    if block.type == "tool_use":
-        handler = TOOL_HANDLERS.get(block.name)
-        output = handler(**block.input) if handler \
-            else f"Unknown tool: {block.name}"
-        results.append({
-            "type": "tool_result",
-            "tool_use_id": block.id,
-            "content": output,
-        })
+for tool_call in choice.message.tool_calls:
+    handler = TOOL_HANDLERS.get(tool_call.function.name)
+    arguments = json.loads(tool_call.function.arguments)
+    output = handler(**arguments) if handler \
+        else f"Unknown tool: {tool_call.function.name}"
+    tool_results.append({
+        "role": "tool",
+        "tool_call_id": tool_call.id,
+        "content": output,
+    })
 ```
 
 Add a tool = add a handler + add a schema entry. The loop never changes.

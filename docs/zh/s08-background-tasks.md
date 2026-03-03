@@ -1,5 +1,7 @@
 # s08: Background Tasks (后台任务)
 
+> **注意**: 本文档已更新为 Qwen API (OpenAI 兼容)。原 Claude API 已不再使用。
+
 `s01 > s02 > s03 > s04 > s05 > s06 | s07 > [ s08 ] s09 > s10 > s11 > s12`
 
 > *"慢操作丢后台, agent 继续想下一步"* -- 后台线程跑命令, 完成后注入通知。
@@ -81,7 +83,11 @@ def agent_loop(messages: list):
                            f"</background-results>"})
             messages.append({"role": "assistant",
                 "content": "Noted background results."})
-        response = client.messages.create(...)
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "system", "content": SYSTEM}] + messages,
+            tools=TOOLS,
+        )
 ```
 
 循环保持单线程。只有子进程 I/O 被并行化。

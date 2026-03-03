@@ -72,7 +72,7 @@ def _execute(self, task_id, command):
 ```python
 def agent_loop(messages: list):
     while True:
-        notifs = BG.drain_notifications()
+        notifs = BG.drain_notification()
         if notifs:
             notif_text = "\n".join(
                 f"[bg:{n['task_id']}] {n['result']}" for n in notifs)
@@ -81,7 +81,7 @@ def agent_loop(messages: list):
                            f"</background-results>"})
             messages.append({"role": "assistant",
                 "content": "Noted background results."})
-        response = client.messages.create(...)
+        response = client.chat.completions.create(...)
 ```
 
 The loop stays single-threaded. Only subprocess I/O is parallelized.

@@ -26,17 +26,17 @@ import os
 import subprocess
 from pathlib import Path
 
-from anthropic import Anthropic
+from openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
-if os.getenv("ANTHROPIC_BASE_URL"):
-    os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
-
 WORKDIR = Path.cwd()
-client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
-MODEL = os.environ["MODEL_ID"]
+client = OpenAI(
+    api_key=os.getenv("DASHSCOPE_API_KEY"),
+    base_url=os.getenv("OPENAI_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+)
+MODEL = os.environ.get("MODEL_ID", "qwen-max")
 TASKS_DIR = WORKDIR / ".tasks"
 
 SYSTEM = f"You are a coding agent at {WORKDIR}. Use task tools to plan and track work."
@@ -78,19 +78,19 @@ class TaskManager:
     def update(self, task_id: int, status: str = None,
                add_blocked_by: list = None, add_blocks: list = None) -> str:
         task = self._load(task_id)
-        if status:
+        if status is not None:
             if status not in ("pending", "in_progress", "completed"):
                 raise ValueError(f"Invalid status: {status}")
             task["status"] = status
             # When a task is completed, remove it from all other tasks' blockedBy
             if status == "completed":
                 self._clear_dependency(task_id)
-        if add_blocked_by:
-            task["blockedBy"] = list(set(task["blockedBy"] + add_blocked_by))
-        if add_blocks:
-            task["blocks"] = list(set(task["blocks"] + add_blocks))
+        if add_blocked_by is not None:
+            task["blockedBy"] = list(set(task["blockedBy"] + (add_blocked_by or [])))
+        if add_blocks is not None:
+            task["blocks"] = list(set(task["blocks"] + (add_blocks or [])))
             # Bidirectional: also update the blocked tasks' blockedBy lists
-            for blocked_id in add_blocks:
+            for blocked_id in (add_blocks or []):
                 try:
                     blocked = self._load(blocked_id)
                     if task_id not in blocked["blockedBy"]:
@@ -145,10 +145,10 @@ def run_bash(command: str) -> str:
     except subprocess.TimeoutExpired:
         return "Error: Timeout (120s)"
 
-def run_read(path: str, limit: int = None) -> str:
+def run_read(path: str, limit=None) -> str:
     try:
         lines = safe_path(path).read_text().splitlines()
-        if limit and limit < len(lines):
+        if limit is not None and isinstance(limit, int) and limit < len(lines):
             lines = lines[:limit] + [f"... ({len(lines) - limit} more)"]
         return "\n".join(lines)[:50000]
     except Exception as e:
@@ -181,51 +181,162 @@ TOOL_HANDLERS = {
     "write_file":  lambda **kw: run_write(kw["path"], kw["content"]),
     "edit_file":   lambda **kw: run_edit(kw["path"], kw["old_text"], kw["new_text"]),
     "task_create": lambda **kw: TASKS.create(kw["subject"], kw.get("description", "")),
-    "task_update": lambda **kw: TASKS.update(kw["task_id"], kw.get("status"), kw.get("addBlockedBy"), kw.get("addBlocks")),
+    "task_update": lambda **kw: TASKS.update(
+        kw["task_id"], 
+        kw.get("status") if kw.get("status") is not None else None,
+        kw.get("addBlockedBy") if kw.get("addBlockedBy") is not None else None,
+        kw.get("addBlocks") if kw.get("addBlocks") is not None else None
+    ),
     "task_list":   lambda **kw: TASKS.list_all(),
     "task_get":    lambda **kw: TASKS.get(kw["task_id"]),
 }
 
 TOOLS = [
-    {"name": "bash", "description": "Run a shell command.",
-     "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
-    {"name": "read_file", "description": "Read file contents.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["path"]}},
-    {"name": "write_file", "description": "Write content to file.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}},
-    {"name": "edit_file", "description": "Replace exact text in file.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}},
-    {"name": "task_create", "description": "Create a new task.",
-     "input_schema": {"type": "object", "properties": {"subject": {"type": "string"}, "description": {"type": "string"}}, "required": ["subject"]}},
-    {"name": "task_update", "description": "Update a task's status or dependencies.",
-     "input_schema": {"type": "object", "properties": {"task_id": {"type": "integer"}, "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}, "addBlockedBy": {"type": "array", "items": {"type": "integer"}}, "addBlocks": {"type": "array", "items": {"type": "integer"}}}, "required": ["task_id"]}},
-    {"name": "task_list", "description": "List all tasks with status summary.",
-     "input_schema": {"type": "object", "properties": {}}},
-    {"name": "task_get", "description": "Get full details of a task by ID.",
-     "input_schema": {"type": "object", "properties": {"task_id": {"type": "integer"}}, "required": ["task_id"]}},
+    {
+        "type": "function",
+        "function": {
+            "name": "bash",
+            "description": "Run a shell command.",
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+            },
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read file contents.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}},
+                "required": ["path"],
+            },
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "Write content to file.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+                "required": ["path", "content"],
+            },
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_file",
+            "description": "Replace exact text in file.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}},
+                "required": ["path", "old_text", "new_text"],
+            },
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "task_create",
+            "description": "Create a new task.",
+            "parameters": {
+                "type": "object",
+                "properties": {"subject": {"type": "string"}, "description": {"type": "string"}},
+                "required": ["subject"],
+            },
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "task_update",
+            "description": "Update a task's status or dependencies.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "integer"},
+                    "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]},
+                    "addBlockedBy": {"type": "array", "items": {"type": "integer"}},
+                    "addBlocks": {"type": "array", "items": {"type": "integer"}}
+                },
+                "required": ["task_id"],
+            },
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "task_list",
+            "description": "List all tasks with status summary.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "task_get",
+            "description": "Get full details of a task by ID.",
+            "parameters": {
+                "type": "object",
+                "properties": {"task_id": {"type": "integer"}},
+                "required": ["task_id"],
+            },
+        }
+    },
 ]
 
 
 def agent_loop(messages: list):
     while True:
-        response = client.messages.create(
-            model=MODEL, system=SYSTEM, messages=messages,
-            tools=TOOLS, max_tokens=8000,
+        # Prepare messages with system message for OpenAI
+        api_messages = [{"role": "system", "content": SYSTEM}] + messages
+        
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=api_messages,
+            tools=TOOLS,
+            max_tokens=8000,
         )
-        messages.append({"role": "assistant", "content": response.content})
-        if response.stop_reason != "tool_use":
+        
+        choice = response.choices[0]
+        message_content = choice.message.content if choice.message.content is not None else ""
+        assistant_message = {
+            "role": "assistant",
+            "content": message_content,
+        }
+        if choice.message.tool_calls:
+            assistant_message["tool_calls"] = choice.message.tool_calls
+        messages.append(assistant_message)
+
+        if choice.finish_reason != "tool_calls":
             return
+
         results = []
-        for block in response.content:
-            if block.type == "tool_use":
-                handler = TOOL_HANDLERS.get(block.name)
-                try:
-                    output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
-                except Exception as e:
-                    output = f"Error: {e}"
-                print(f"> {block.name}: {str(output)[:200]}")
-                results.append({"type": "tool_result", "tool_use_id": block.id, "content": str(output)})
-        messages.append({"role": "user", "content": results})
+        tool_calls = choice.message.tool_calls or []
+        for tool_call in tool_calls:
+            function_name = tool_call.function.name
+            handler = TOOL_HANDLERS.get(function_name)
+            try:
+                arguments = json.loads(tool_call.function.arguments)
+                output = handler(**arguments) if handler else f"Unknown tool: {function_name}"
+            except Exception as e:
+                output = f"Error: {e}"
+            print(f"> {function_name}: {str(output)[:200]}")
+            results.append({
+                "role": "tool", 
+                "tool_call_id": tool_call.id, 
+                "content": str(output)
+            })
+        messages.extend(results)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,7 @@
 # s10: Team Protocols (团队协议)
 
+> **注意**: 本文档已更新为 Qwen API (OpenAI 兼容)。原 Claude API 已不再使用。
+
 `s01 > s02 > s03 > s04 > s05 > s06 | s07 > s08 > s09 > [ s10 ] s11 > s12`
 
 > *"队友之间要有统一的沟通规矩"* -- 一个 request-response 模式驱动所有协商。

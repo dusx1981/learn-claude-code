@@ -1,5 +1,7 @@
 # s06: Context Compact (上下文压缩)
 
+> **注意**: 本文档已更新为 Qwen API (OpenAI 兼容)。原 Claude API 已不再使用。
+
 `s01 > s02 > s03 > s04 > s05 > [ s06 ] | s07 > s08 > s09 > s10 > s11 > s12`
 
 > *"上下文总会满, 要有办法腾地方"* -- 三层压缩策略, 换来无限会话。
@@ -70,7 +72,7 @@ def auto_compact(messages: list) -> list:
         for msg in messages:
             f.write(json.dumps(msg, default=str) + "\n")
     # LLM summarizes
-    response = client.messages.create(
+    response = client.chat.completions.create(
         model=MODEL,
         messages=[{"role": "user", "content":
             "Summarize this conversation for continuity..."
@@ -78,7 +80,7 @@ def auto_compact(messages: list) -> list:
         max_tokens=2000,
     )
     return [
-        {"role": "user", "content": f"[Compressed]\n\n{response.content[0].text}"},
+        {"role": "user", "content": f"[Compressed]\n\n{response.choices[0].message.content}"},
         {"role": "assistant", "content": "Understood. Continuing."},
     ]
 ```
@@ -93,7 +95,7 @@ def agent_loop(messages: list):
         micro_compact(messages)                        # Layer 1
         if estimate_tokens(messages) > THRESHOLD:
             messages[:] = auto_compact(messages)       # Layer 2
-        response = client.messages.create(...)
+        response = client.chat.completions.create(...)
         # ... tool execution ...
         if manual_compact:
             messages[:] = auto_compact(messages)       # Layer 3

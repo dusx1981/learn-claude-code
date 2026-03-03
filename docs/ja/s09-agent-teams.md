@@ -93,9 +93,12 @@ def _teammate_loop(self, name, role, prompt):
                 "content": f"<inbox>{inbox}</inbox>"})
             messages.append({"role": "assistant",
                 "content": "Noted inbox messages."})
-        response = client.messages.create(...)
-        if response.stop_reason != "tool_use":
-            break
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "system", "content": SYSTEM}] + messages,
+            tools=TOOLS,
+        )
+        choice = response.choices[0]
         # execute tools, append results...
     self._find_member(name)["status"] = "idle"
 ```

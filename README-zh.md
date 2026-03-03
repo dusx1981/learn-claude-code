@@ -1,4 +1,4 @@
-# Learn Claude Code -- 从 0 到 1 构建 nano Claude Code-like agent
+# Learn Qwen Code -- 从 0 到 1 构建 nano Qwen Code-like agent
 
 [English](./README.md) | [中文](./README-zh.md) | [日本語](./README-ja.md)
 
@@ -8,7 +8,7 @@
 
     User --> messages[] --> LLM --> response
                                       |
-                            stop_reason == "tool_use"?
+                            finish_reason == "tool_calls"?
                            /                          \
                          yes                           no
                           |                             |
@@ -55,33 +55,41 @@
 ```python
 def agent_loop(messages):
     while True:
-        response = client.messages.create(
-            model=MODEL, system=SYSTEM,
-            messages=messages, tools=TOOLS,
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "system", "content": SYSTEM}] + messages,
+            tools=TOOLS,
         )
-        messages.append({"role": "assistant",
-                         "content": response.content})
+        choice = response.choices[0]
+        assistant_message = {
+            "role": "assistant",
+            "content": choice.message.content,
+        }
+        if choice.message.tool_calls:
+            assistant_message["tool_calls"] = choice.message.tool_calls
+        messages.append(assistant_message)
 
-        if response.stop_reason != "tool_use":
+        if choice.finish_reason != "tool_calls":
             return
 
-        results = []
-        for block in response.content:
-            if block.type == "tool_use":
-                output = TOOL_HANDLERS[block.name](**block.input)
-                results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": output,
-                })
-        messages.append({"role": "user", "content": results})
+        tool_results = []
+        for tool_call in choice.message.tool_calls:
+            function_name = tool_call.function.name
+            arguments = json.loads(tool_call.function.arguments)
+            output = TOOL_HANDLERS[function_name](**arguments)
+            tool_results.append({
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": str(output),
+            })
+        messages.extend(tool_results)
 ```
 
 每个课程在这个循环之上叠加一个机制 -- 循环本身始终不变。
 
 ## 范围说明 (重要)
 
-本仓库是一个 0->1 的学习型项目，用于从零构建 nano Claude Code-like agent。
+本仓库是一个 0->1 的学习型项目，用于从零构建 nano Qwen Code-like agent。
 为保证学习路径清晰，仓库有意简化或省略了部分生产机制：
 
 - 完整事件 / Hook 总线 (例如 PreToolUse、SessionStart/End、ConfigChange)。  
@@ -98,7 +106,7 @@ def agent_loop(messages):
 git clone https://github.com/shareAI-lab/learn-claude-code
 cd learn-claude-code
 pip install -r requirements.txt
-cp .env.example .env   # 编辑 .env 填入你的 ANTHROPIC_API_KEY
+cp .env.example .env   # 编辑 .env 填入你的 DASHSCOPE_API_KEY
 
 python agents/s01_agent_loop.py       # 从这里开始
 python agents/s12_worktree_task_isolation.py  # 完整递进终点
@@ -193,7 +201,7 @@ GitHub: **[shareAI-lab/Kode-cli](https://github.com/shareAI-lab/Kode-cli)**
 
 ### Kode Agent SDK -- 把 Agent 能力嵌入你的应用
 
-官方 Claude Code Agent SDK 底层与完整 CLI 进程通信 -- 每个并发用户 = 一个终端进程。Kode SDK 是独立库, 无 per-user 进程开销, 可嵌入后端、浏览器插件、嵌入式设备等任意运行时。
+Kode Agent SDK 是独立库, 无 per-user 进程开销, 可嵌入后端、浏览器插件、嵌入式设备等任意运行时。
 
 GitHub: **[shareAI-lab/Kode-agent-sdk](https://github.com/shareAI-lab/Kode-agent-sdk)**
 
@@ -201,7 +209,7 @@ GitHub: **[shareAI-lab/Kode-agent-sdk](https://github.com/shareAI-lab/Kode-agent
 
 ## 姊妹教程: 从*被动临时会话*到*主动常驻助手*
 
-本仓库教的 agent 属于 **用完即走** 型 -- 开终端、给任务、做完关掉, 下次重开是全新会话。Claude Code 就是这种模式。
+本仓库教的 agent 属于 **用完即走** 型 -- 开终端、给任务、做完关掉, 下次重开是全新会话。Qwen Code 就是这种模式。
 
 但 [OpenClaw](https://github.com/openclaw/openclaw) (小龙虾) 证明了另一种可能: 在同样的 agent core 之上, 加两个机制就能让 agent 从"踹一下动一下"变成"自己隔 30 秒醒一次找活干":
 

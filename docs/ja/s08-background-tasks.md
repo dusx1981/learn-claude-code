@@ -81,7 +81,11 @@ def agent_loop(messages: list):
                            f"</background-results>"})
             messages.append({"role": "assistant",
                 "content": "Noted background results."})
-        response = client.messages.create(...)
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "system", "content": SYSTEM}] + messages,
+            tools=TOOLS,
+        )
 ```
 
 ループはシングルスレッドのまま。サブプロセスI/Oだけが並列化される。

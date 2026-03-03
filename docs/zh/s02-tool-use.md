@@ -1,5 +1,7 @@
 # s02: Tool Use (工具使用)
 
+> **注意**: 本文档已更新为 Qwen API (OpenAI 兼容)。原 Claude API 已不再使用。
+
 `s01 > [ s02 ] s03 > s04 > s05 > s06 | s07 > s08 > s09 > s10 > s11 > s12`
 
 > *"加一个工具, 只加一个 handler"* -- 循环不用动, 新工具注册进 dispatch map 就行。
@@ -61,16 +63,16 @@ TOOL_HANDLERS = {
 3. 循环中按名称查找处理函数。循环体本身与 s01 完全一致。
 
 ```python
-for block in response.content:
-    if block.type == "tool_use":
-        handler = TOOL_HANDLERS.get(block.name)
-        output = handler(**block.input) if handler \
-            else f"Unknown tool: {block.name}"
-        results.append({
-            "type": "tool_result",
-            "tool_use_id": block.id,
-            "content": output,
-        })
+for tool_call in choice.message.tool_calls:
+    handler = TOOL_HANDLERS.get(tool_call.function.name)
+    arguments = json.loads(tool_call.function.arguments)
+    output = handler(**arguments) if handler \
+        else f"Unknown tool: {tool_call.function.name}"
+    tool_results.append({
+        "role": "tool",
+        "tool_call_id": tool_call.id,
+        "content": output,
+    })
 ```
 
 加工具 = 加 handler + 加 schema。循环永远不变。

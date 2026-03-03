@@ -1,5 +1,7 @@
 # s04: Subagents (子智能体)
 
+> **注意**: 本文档已更新为 Qwen API (OpenAI 兼容)。原 Claude API 已不再使用。
+
 `s01 > s02 > s03 > [ s04 ] s05 > s06 | s07 > s08 > s09 > s10 > s11 > s12`
 
 > *"大任务拆小, 每个小任务干净的上下文"* -- 子智能体用独立 messages[], 不污染主对话。
@@ -46,27 +48,36 @@ PARENT_TOOLS = CHILD_TOOLS + [
 def run_subagent(prompt: str) -> str:
     sub_messages = [{"role": "user", "content": prompt}]
     for _ in range(30):  # safety limit
-        response = client.messages.create(
-            model=MODEL, system=SUBAGENT_SYSTEM,
-            messages=sub_messages,
-            tools=CHILD_TOOLS, max_tokens=8000,
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "system", "content": SUBAGENT_SYSTEM}] + sub_messages,
+            tools=CHILD_TOOLS,
         )
-        sub_messages.append({"role": "assistant",
-                             "content": response.content})
-        if response.stop_reason != "tool_use":
+        choice = response.choices[0]
+        assistant_message = {
+            "role": "assistant",
+            "content": choice.message.content,
+        }
+        if choice.message.tool_calls:
+            assistant_message["tool_calls"] = choice.message.tool_calls
+        sub_messages.append(assistant_message)
+        
+        if choice.finish_reason != "tool_calls":
             break
-        results = []
-        for block in response.content:
-            if block.type == "tool_use":
-                handler = TOOL_HANDLERS.get(block.name)
-                output = handler(**block.input)
-                results.append({"type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": str(output)[:50000]})
-        sub_messages.append({"role": "user", "content": results})
-    return "".join(
-        b.text for b in response.content if hasattr(b, "text")
-    ) or "(no summary)"
+        
+        tool_results = []
+        for tool_call in choice.message.tool_calls:
+            handler = TOOL_HANDLERS.get(tool_call.function.name)
+            arguments = json.loads(tool_call.function.arguments)
+            output = handler(**arguments)
+            tool_results.append({
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": str(output)[:50000]
+            })
+        sub_messages.extend(tool_results)
+    
+    return choice.message.content if choice.message.content else "(no summary)"
 ```
 
 子智能体可能跑了 30+ 次工具调用, 但整个消息历史直接丢弃。父智能体收到的只是一段摘要文本, 作为普通 `tool_result` 返回。

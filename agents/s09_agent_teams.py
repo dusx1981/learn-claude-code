@@ -49,16 +49,17 @@ import threading
 import time
 from pathlib import Path
 
-from anthropic import Anthropic
+from openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
-if os.getenv("ANTHROPIC_BASE_URL"):
-    os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
 
 WORKDIR = Path.cwd()
-client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
-MODEL = os.environ["MODEL_ID"]
+client = OpenAI(
+    api_key=os.getenv("DASHSCOPE_API_KEY"),
+    base_url=os.getenv("OPENAI_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+)
+MODEL = os.environ.get("MODEL_ID", "qwen-max")
 TEAM_DIR = WORKDIR / ".team"
 INBOX_DIR = TEAM_DIR / "inbox"
 
@@ -71,6 +72,21 @@ VALID_MSG_TYPES = {
     "shutdown_response",
     "plan_approval_response",
 }
+
+
+def _to_openai_tools(anthropic_tools: list) -> list:
+    """Convert Anthropic tool format to OpenAI format."""
+    openai_tools = []
+    for tool in anthropic_tools:
+        openai_tools.append({
+            "type": "function",
+            "function": {
+                "name": tool["name"],
+                "description": tool["description"],
+                "parameters": tool["input_schema"],
+            },
+        })
+    return openai_tools
 
 
 # -- MessageBus: JSONL inbox per teammate --
@@ -174,29 +190,36 @@ class TeammateManager:
             for msg in inbox:
                 messages.append({"role": "user", "content": json.dumps(msg)})
             try:
-                response = client.messages.create(
+                response = client.chat.completions.create(
                     model=MODEL,
-                    system=sys_prompt,
-                    messages=messages,
+                    messages=[{"role": "system", "content": sys_prompt}] + messages,
                     tools=tools,
                     max_tokens=8000,
                 )
             except Exception:
                 break
-            messages.append({"role": "assistant", "content": response.content})
-            if response.stop_reason != "tool_use":
+            choice = response.choices[0]
+            assistant_message = {
+                "role": "assistant",
+                "content": choice.message.content,
+            }
+            if choice.message.tool_calls:
+                assistant_message["tool_calls"] = choice.message.tool_calls
+            messages.append(assistant_message)
+            if choice.finish_reason != "tool_calls":
                 break
             results = []
-            for block in response.content:
-                if block.type == "tool_use":
-                    output = self._exec(name, block.name, block.input)
-                    print(f"  [{name}] {block.name}: {str(output)[:120]}")
-                    results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": str(output),
-                    })
-            messages.append({"role": "user", "content": results})
+            for tool_call in choice.message.tool_calls:
+                function_name = tool_call.function.name
+                arguments = json.loads(tool_call.function.arguments)
+                output = self._exec(name, function_name, arguments)
+                print(f"  [{name}] {function_name}: {str(output)[:120]}")
+                results.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": str(output),
+                })
+            messages.extend(results)
         member = self._find_member(name)
         if member and member["status"] != "shutdown":
             member["status"] = "idle"
@@ -220,7 +243,7 @@ class TeammateManager:
 
     def _teammate_tools(self) -> list:
         # these base tools are unchanged from s02
-        return [
+        anthropic_tools = [
             {"name": "bash", "description": "Run a shell command.",
              "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
             {"name": "read_file", "description": "Read file contents.",
@@ -234,6 +257,7 @@ class TeammateManager:
             {"name": "read_inbox", "description": "Read and drain your inbox.",
              "input_schema": {"type": "object", "properties": {}}},
         ]
+        return _to_openai_tools(anthropic_tools)
 
     def list_all(self) -> str:
         if not self.config["members"]:
@@ -318,8 +342,7 @@ TOOL_HANDLERS = {
     "broadcast":       lambda **kw: BUS.broadcast("lead", kw["content"], TEAM.member_names()),
 }
 
-# these base tools are unchanged from s02
-TOOLS = [
+TOOLS = _to_openai_tools([
     {"name": "bash", "description": "Run a shell command.",
      "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
     {"name": "read_file", "description": "Read file contents.",
@@ -338,7 +361,7 @@ TOOLS = [
      "input_schema": {"type": "object", "properties": {}}},
     {"name": "broadcast", "description": "Send a message to all teammates.",
      "input_schema": {"type": "object", "properties": {"content": {"type": "string"}}, "required": ["content"]}},
-]
+])
 
 
 def agent_loop(messages: list):
@@ -353,31 +376,38 @@ def agent_loop(messages: list):
                 "role": "assistant",
                 "content": "Noted inbox messages.",
             })
-        response = client.messages.create(
+        response = client.chat.completions.create(
             model=MODEL,
-            system=SYSTEM,
-            messages=messages,
+            messages=[{"role": "system", "content": SYSTEM}] + messages,
             tools=TOOLS,
             max_tokens=8000,
         )
-        messages.append({"role": "assistant", "content": response.content})
-        if response.stop_reason != "tool_use":
+        choice = response.choices[0]
+        assistant_message = {
+            "role": "assistant",
+            "content": choice.message.content,
+        }
+        if choice.message.tool_calls:
+            assistant_message["tool_calls"] = choice.message.tool_calls
+        messages.append(assistant_message)
+        if choice.finish_reason != "tool_calls":
             return
         results = []
-        for block in response.content:
-            if block.type == "tool_use":
-                handler = TOOL_HANDLERS.get(block.name)
-                try:
-                    output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
-                except Exception as e:
-                    output = f"Error: {e}"
-                print(f"> {block.name}: {str(output)[:200]}")
-                results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": str(output),
-                })
-        messages.append({"role": "user", "content": results})
+        for tool_call in choice.message.tool_calls:
+            function_name = tool_call.function.name
+            arguments = json.loads(tool_call.function.arguments)
+            handler = TOOL_HANDLERS.get(function_name)
+            try:
+                output = handler(**arguments) if handler else f"Unknown tool: {function_name}"
+            except Exception as e:
+                output = f"Error: {e}"
+            print(f"> {function_name}: {str(output)[:200]}")
+            results.append({
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": str(output),
+            })
+        messages.extend(results)
 
 
 if __name__ == "__main__":

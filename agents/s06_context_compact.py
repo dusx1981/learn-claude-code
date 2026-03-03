@@ -39,17 +39,17 @@ import subprocess
 import time
 from pathlib import Path
 
-from anthropic import Anthropic
+from openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
-if os.getenv("ANTHROPIC_BASE_URL"):
-    os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
-
 WORKDIR = Path.cwd()
-client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
-MODEL = os.environ["MODEL_ID"]
+client = OpenAI(
+    api_key=os.getenv("DASH_API_KEY"),
+    base_url=os.getenv("OPENAI_BASE_URL", "https://coding.dashscope.aliyuncs.com/v1")
+)
+MODEL = os.environ.get("MODEL_ID", "GLM-5")
 
 SYSTEM = f"You are a coding agent at {WORKDIR}. Use tools to solve tasks."
 
@@ -65,31 +65,33 @@ def estimate_tokens(messages: list) -> int:
 
 # -- Layer 1: micro_compact - replace old tool results with placeholders --
 def micro_compact(messages: list) -> list:
-    # Collect (msg_index, part_index, tool_result_dict) for all tool_result entries
-    tool_results = []
-    for msg_idx, msg in enumerate(messages):
-        if msg["role"] == "user" and isinstance(msg.get("content"), list):
-            for part_idx, part in enumerate(msg["content"]):
-                if isinstance(part, dict) and part.get("type") == "tool_result":
-                    tool_results.append((msg_idx, part_idx, part))
-    if len(tool_results) <= KEEP_RECENT:
+    # Collect indices of all tool result messages
+    tool_result_indices = []
+    for idx, msg in enumerate(messages):
+        if msg.get("role") == "tool":
+            tool_result_indices.append(idx)
+    
+    if len(tool_result_indices) <= KEEP_RECENT:
         return messages
-    # Find tool_name for each result by matching tool_use_id in prior assistant messages
+    
+    # Keep only the last KEEP_RECENT tool results
+    to_clear = tool_result_indices[:-KEEP_RECENT]
+    
+    # Find tool_name for each result by matching tool_call_id in prior assistant messages
     tool_name_map = {}
     for msg in messages:
-        if msg["role"] == "assistant":
-            content = msg.get("content", [])
-            if isinstance(content, list):
-                for block in content:
-                    if hasattr(block, "type") and block.type == "tool_use":
-                        tool_name_map[block.id] = block.name
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            for tool_call in msg["tool_calls"]:
+                tool_name_map[tool_call["id"]] = tool_call["function"]["name"]
+    
     # Clear old results (keep last KEEP_RECENT)
-    to_clear = tool_results[:-KEEP_RECENT]
-    for _, _, result in to_clear:
-        if isinstance(result.get("content"), str) and len(result["content"]) > 100:
-            tool_id = result.get("tool_use_id", "")
+    for idx in to_clear:
+        tool_msg = messages[idx]
+        if isinstance(tool_msg.get("content"), str) and len(tool_msg["content"]) > 100:
+            tool_id = tool_msg.get("tool_call_id", "")
             tool_name = tool_name_map.get(tool_id, "unknown")
-            result["content"] = f"[Previous: used {tool_name}]"
+            tool_msg["content"] = f"[Previous: used {tool_name}]"
+    
     return messages
 
 
@@ -104,7 +106,7 @@ def auto_compact(messages: list) -> list:
     print(f"[transcript saved: {transcript_path}]")
     # Ask LLM to summarize
     conversation_text = json.dumps(messages, default=str)[:80000]
-    response = client.messages.create(
+    response = client.chat.completions.create(
         model=MODEL,
         messages=[{"role": "user", "content":
             "Summarize this conversation for continuity. Include: "
@@ -112,7 +114,7 @@ def auto_compact(messages: list) -> list:
             "Be concise but preserve critical details.\n\n" + conversation_text}],
         max_tokens=2000,
     )
-    summary = response.content[0].text
+    summary = response.choices[0].message.content
     # Replace all messages with compressed summary
     return [
         {"role": "user", "content": f"[Conversation compressed. Transcript: {transcript_path}]\n\n{summary}"},
@@ -139,10 +141,10 @@ def run_bash(command: str) -> str:
     except subprocess.TimeoutExpired:
         return "Error: Timeout (120s)"
 
-def run_read(path: str, limit: int = None) -> str:
+def run_read(path: str, limit=None) -> str:
     try:
         lines = safe_path(path).read_text().splitlines()
-        if limit and limit < len(lines):
+        if limit is not None and isinstance(limit, int) and limit < len(lines):
             lines = lines[:limit] + [f"... ({len(lines) - limit} more)"]
         return "\n".join(lines)[:50000]
     except Exception as e:
@@ -171,23 +173,72 @@ def run_edit(path: str, old_text: str, new_text: str) -> str:
 
 TOOL_HANDLERS = {
     "bash":       lambda **kw: run_bash(kw["command"]),
-    "read_file":  lambda **kw: run_read(kw["path"], kw.get("limit")),
+    "read_file":  lambda **kw: run_read(kw["path"], kw.get("limit") if kw.get("limit") is not None else None),
     "write_file": lambda **kw: run_write(kw["path"], kw["content"]),
     "edit_file":  lambda **kw: run_edit(kw["path"], kw["old_text"], kw["new_text"]),
     "compact":    lambda **kw: "Manual compression requested.",
 }
 
 TOOLS = [
-    {"name": "bash", "description": "Run a shell command.",
-     "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
-    {"name": "read_file", "description": "Read file contents.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["path"]}},
-    {"name": "write_file", "description": "Write content to file.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}},
-    {"name": "edit_file", "description": "Replace exact text in file.",
-     "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}},
-    {"name": "compact", "description": "Trigger manual conversation compression.",
-     "input_schema": {"type": "object", "properties": {"focus": {"type": "string", "description": "What to preserve in the summary"}}}},
+    {
+        "type": "function",
+        "function": {
+            "name": "bash",
+            "description": "Run a shell command.",
+            "parameters": {
+                "type": "object",
+                "properties": {"command": {"type": "string"}},
+                "required": ["command"],
+            },
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read file contents.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}, "limit": {"type": "integer"}},
+                "required": ["path"],
+            },
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "Write content to file.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+                "required": ["path", "content"],
+            },
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_file",
+            "description": "Replace exact text in file.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}},
+                "required": ["path", "old_text", "new_text"],
+            },
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "compact",
+            "description": "Trigger manual conversation compression.",
+            "parameters": {
+                "type": "object",
+                "properties": {"focus": {"type": "string", "description": "What to preserve in the summary"}},
+            },
+        }
+    },
 ]
 
 
@@ -199,29 +250,52 @@ def agent_loop(messages: list):
         if estimate_tokens(messages) > THRESHOLD:
             print("[auto_compact triggered]")
             messages[:] = auto_compact(messages)
-        response = client.messages.create(
-            model=MODEL, system=SYSTEM, messages=messages,
-            tools=TOOLS, max_tokens=8000,
+        
+        # Prepare messages with system message for OpenAI
+        api_messages = [{"role": "system", "content": SYSTEM}] + messages
+        
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=api_messages,
+            tools=TOOLS,
+            max_tokens=8000,
         )
-        messages.append({"role": "assistant", "content": response.content})
-        if response.stop_reason != "tool_use":
+        
+        choice = response.choices[0]
+        message_content = choice.message.content if choice.message.content is not None else ""
+        assistant_message = {
+            "role": "assistant",
+            "content": message_content,
+        }
+        if choice.message.tool_calls:
+            assistant_message["tool_calls"] = choice.message.tool_calls
+        messages.append(assistant_message)
+
+        if choice.finish_reason != "tool_calls":
             return
+
         results = []
         manual_compact = False
-        for block in response.content:
-            if block.type == "tool_use":
-                if block.name == "compact":
-                    manual_compact = True
-                    output = "Compressing..."
-                else:
-                    handler = TOOL_HANDLERS.get(block.name)
-                    try:
-                        output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
-                    except Exception as e:
-                        output = f"Error: {e}"
-                print(f"> {block.name}: {str(output)[:200]}")
-                results.append({"type": "tool_result", "tool_use_id": block.id, "content": str(output)})
-        messages.append({"role": "user", "content": results})
+        tool_calls = choice.message.tool_calls or []
+        for tool_call in tool_calls:
+            function_name = tool_call.function.name
+            if function_name == "compact":
+                manual_compact = True
+                output = "Compressing..."
+            else:
+                handler = TOOL_HANDLERS.get(function_name)
+                try:
+                    arguments = json.loads(tool_call.function.arguments)
+                    output = handler(**arguments) if handler else f"Unknown tool: {function_name}"
+                except Exception as e:
+                    output = f"Error: {e}"
+            print(f"> {function_name}: {str(output)[:200]}")
+            results.append({
+                "role": "tool", 
+                "tool_call_id": tool_call.id, 
+                "content": str(output)
+            })
+        messages.extend(results)
         # Layer 3: manual compact triggered by the compact tool
         if manual_compact:
             print("[manual compact]")

@@ -46,27 +46,28 @@ PARENT_TOOLS = CHILD_TOOLS + [
 def run_subagent(prompt: str) -> str:
     sub_messages = [{"role": "user", "content": prompt}]
     for _ in range(30):  # safety limit
-        response = client.messages.create(
-            model=MODEL, system=SUBAGENT_SYSTEM,
-            messages=sub_messages,
-            tools=CHILD_TOOLS, max_tokens=8000,
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "system", "content": SUBAGENT_SYSTEM}] + sub_messages,
+            tools=CHILD_TOOLS,
         )
-        sub_messages.append({"role": "assistant",
-                             "content": response.content})
-        if response.stop_reason != "tool_use":
+        choice = response.choices[0]
+        assistant_message = {"role": "assistant", "content": choice.message.content}
+        if choice.message.tool_calls:
+            assistant_message["tool_calls"] = choice.message.tool_calls
+        sub_messages.append(assistant_message)
+        if choice.finish_reason != "tool_calls":
             break
-        results = []
-        for block in response.content:
-            if block.type == "tool_use":
-                handler = TOOL_HANDLERS.get(block.name)
-                output = handler(**block.input)
-                results.append({"type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": str(output)[:50000]})
-        sub_messages.append({"role": "user", "content": results})
-    return "".join(
-        b.text for b in response.content if hasattr(b, "text")
-    ) or "(no summary)"
+        tool_results = []
+        for tool_call in choice.message.tool_calls:
+            handler = TOOL_HANDLERS.get(tool_call.function.name)
+            arguments = json.loads(tool_call.function.arguments)
+            output = handler(**arguments)
+            tool_results.append({"role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": str(output)[:50000]})
+        sub_messages.extend(tool_results)
+    return choice.message.content or "(no summary)"
 ```
 
 The child's entire message history (possibly 30+ tool calls) is discarded. The parent receives a one-paragraph summary as a normal `tool_result`.

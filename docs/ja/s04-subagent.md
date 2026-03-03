@@ -6,7 +6,7 @@
 
 ## 問題
 
-エージェントが作業するにつれ、messages配列は膨張し続ける。すべてのファイル読み取り、すべてのbash出力がコンテキストに永久に残る。「このプロジェクトはどのテストフレームワークを使っているか」という質問は5つのファイルを読む必要があるかもしれないが、親に必要なのは「pytest」という答えだけだ。
+エージェントが作業するにつれ、messages 配列は膨張し続ける。すべてのファイル読み取り、すべての bash 出力がコンテキストに永久に残る。「このプロジェクトはどのテストフレームワークを使っているか」という質問は 5 つのファイルを読む必要があるかもしれないが、親に必要なのは「pytest」という答えだけだ。
 
 ## 解決策
 
@@ -15,7 +15,7 @@ Parent agent                     Subagent
 +------------------+             +------------------+
 | messages=[...]   |             | messages=[]      | <-- fresh
 |                  |  dispatch   |                  |
-| tool: task       | ----------> | while tool_use:  |
+| tool: task       | ----------> | while tool_calls:  |
 |   prompt="..."   |             |   call tools     |
 |                  |  summary    |   append results |
 |   result = "..." | <---------- | return last text |
@@ -26,7 +26,7 @@ Parent context stays clean. Subagent context is discarded.
 
 ## 仕組み
 
-1. 親に`task`ツールを追加する。子は`task`を除くすべての基本ツールを取得する(再帰的な生成は不可)。
+1. 親に `task` ツールを追加する。子は `task` を除くすべての基本ツールを取得する (再帰的な生成は不可)。
 
 ```python
 PARENT_TOOLS = CHILD_TOOLS + [
@@ -40,38 +40,43 @@ PARENT_TOOLS = CHILD_TOOLS + [
 ]
 ```
 
-2. サブエージェントは`messages=[]`で開始し、自身のループを実行する。最終テキストだけが親に返る。
+2. サブエージェントは `messages=[]` で開始し、自身のループを実行する。最終テキストだけが親に返る。
 
 ```python
 def run_subagent(prompt: str) -> str:
     sub_messages = [{"role": "user", "content": prompt}]
     for _ in range(30):  # safety limit
-        response = client.messages.create(
-            model=MODEL, system=SUBAGENT_SYSTEM,
-            messages=sub_messages,
-            tools=CHILD_TOOLS, max_tokens=8000,
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "system", "content": SUBAGENT_SYSTEM}] + sub_messages,
+            tools=CHILD_TOOLS,
         )
-        sub_messages.append({"role": "assistant",
-                             "content": response.content})
-        if response.stop_reason != "tool_use":
+        choice = response.choices[0]
+        assistant_message = {"role": "assistant", "content": choice.message.content}
+        if choice.message.tool_calls:
+            assistant_message["tool_calls"] = choice.message.tool_calls
+        sub_messages.append(assistant_message)
+        
+        if choice.finish_reason != "tool_calls":
             break
+        
         results = []
-        for block in response.content:
-            if block.type == "tool_use":
-                handler = TOOL_HANDLERS.get(block.name)
-                output = handler(**block.input)
-                results.append({"type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": str(output)[:50000]})
-        sub_messages.append({"role": "user", "content": results})
-    return "".join(
-        b.text for b in response.content if hasattr(b, "text")
-    ) or "(no summary)"
+        for tool_call in choice.message.tool_calls:
+            function_name = tool_call.function.name
+            arguments = json.loads(tool_call.function.arguments)
+            handler = TOOL_HANDLERS.get(function_name)
+            output = handler(**arguments) if handler else f"Unknown tool: {function_name}"
+            results.append({"role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": str(output)[:50000]})
+        sub_messages.extend(results)
+    
+    return choice.message.content or "(no summary)"
 ```
 
-子のメッセージ履歴全体(30回以上のツール呼び出し)は破棄される。親は1段落の要約を通常の`tool_result`として受け取る。
+子のメッセージ履歴全体 (30 回以上のツール呼び出し) は破棄される。親は 1 段落の要約を通常の tool result として受け取る。
 
-## s03からの変更点
+## s03 からの変更点
 
 | Component      | Before (s03)     | After (s04)               |
 |----------------|------------------|---------------------------|

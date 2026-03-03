@@ -1,5 +1,7 @@
 # s11: Autonomous Agents (自治智能体)
 
+> **注意**: 本文档已更新为 Qwen API (OpenAI 兼容)。原 Claude API 已不再使用。
+
 `s01 > s02 > s03 > s04 > s05 > s06 | s07 > s08 > s09 > s10 > [ s11 ] s12`
 
 > *"队友自己看看板, 有活就认领"* -- 不需要领导逐个分配, 自组织。
@@ -53,20 +55,17 @@ def _loop(self, name, role, prompt):
         # -- WORK PHASE --
         messages = [{"role": "user", "content": prompt}]
         for _ in range(50):
-            response = client.messages.create(...)
-            if response.stop_reason != "tool_use":
+            response = client.chat.completions.create(
+                model=MODEL,
+                messages=[{"role": "system", "content": teammate_system_prompt}] + messages,
+                tools=TOOLS,
+            )
+            choice = response.choices[0]
+            if choice.finish_reason != "tool_calls":
                 break
             # execute tools...
             if idle_requested:
                 break
-
-        # -- IDLE PHASE --
-        self._set_status(name, "idle")
-        resume = self._idle_poll(name, messages)
-        if not resume:
-            self._set_status(name, "shutdown")
-            return
-        self._set_status(name, "working")
 ```
 
 2. 空闲阶段循环轮询收件箱和任务看板。

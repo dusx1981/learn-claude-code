@@ -70,15 +70,14 @@ def auto_compact(messages: list) -> list:
         for msg in messages:
             f.write(json.dumps(msg, default=str) + "\n")
     # LLM summarizes
-    response = client.messages.create(
+    response = client.chat.completions.create(
         model=MODEL,
         messages=[{"role": "user", "content":
             "Summarize this conversation for continuity..."
             + json.dumps(messages, default=str)[:80000]}],
-        max_tokens=2000,
     )
     return [
-        {"role": "user", "content": f"[Compressed]\n\n{response.content[0].text}"},
+        {"role": "user", "content": f"[Compressed]\n\n{response.choices[0].message.content}"},
         {"role": "assistant", "content": "Understood. Continuing."},
     ]
 ```
@@ -93,7 +92,7 @@ def agent_loop(messages: list):
         micro_compact(messages)                        # Layer 1
         if estimate_tokens(messages) > THRESHOLD:
             messages[:] = auto_compact(messages)       # Layer 2
-        response = client.messages.create(...)
+        response = client.chat.completions.create(...)
         # ... tool execution ...
         if manual_compact:
             messages[:] = auto_compact(messages)       # Layer 3

@@ -1,4 +1,4 @@
-# Learn Claude Code -- A nano Claude Code-like agent, built from 0 to 1
+# Learn Qwen Code -- A nano Qwen Code-like agent, built from 0 to 1
 
 [English](./README.md) | [中文](./README-zh.md) | [日本語](./README-ja.md)
 
@@ -8,7 +8,7 @@
 
     User --> messages[] --> LLM --> response
                                       |
-                            stop_reason == "tool_use"?
+                            finish_reason == "tool_calls"?
                            /                          \
                          yes                           no
                           |                             |
@@ -55,33 +55,41 @@
 ```python
 def agent_loop(messages):
     while True:
-        response = client.messages.create(
-            model=MODEL, system=SYSTEM,
-            messages=messages, tools=TOOLS,
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "system", "content": SYSTEM}] + messages,
+            tools=TOOLS,
         )
-        messages.append({"role": "assistant",
-                         "content": response.content})
+        choice = response.choices[0]
+        assistant_message = {
+            "role": "assistant",
+            "content": choice.message.content,
+        }
+        if choice.message.tool_calls:
+            assistant_message["tool_calls"] = choice.message.tool_calls
+        messages.append(assistant_message)
 
-        if response.stop_reason != "tool_use":
+        if choice.finish_reason != "tool_calls":
             return
 
-        results = []
-        for block in response.content:
-            if block.type == "tool_use":
-                output = TOOL_HANDLERS[block.name](**block.input)
-                results.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": output,
-                })
-        messages.append({"role": "user", "content": results})
+        tool_results = []
+        for tool_call in choice.message.tool_calls:
+            function_name = tool_call.function.name
+            arguments = json.loads(tool_call.function.arguments)
+            output = TOOL_HANDLERS[function_name](**arguments)
+            tool_results.append({
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": str(output),
+            })
+        messages.extend(tool_results)
 ```
 
 Every session layers one mechanism on top of this loop -- without changing the loop itself.
 
 ## Scope (Important)
 
-This repository is a 0->1 learning project for building a nano Claude Code-like agent.
+This repository is a 0->1 learning project for building a nano Qwen Code-like agent.
 It intentionally simplifies or omits several production mechanisms:
 
 - Full event/hook buses (for example PreToolUse, SessionStart/End, ConfigChange).  
@@ -98,7 +106,7 @@ Treat the team JSONL mailbox protocol in this repo as a teaching implementation,
 git clone https://github.com/shareAI-lab/learn-claude-code
 cd learn-claude-code
 pip install -r requirements.txt
-cp .env.example .env   # Edit .env with your ANTHROPIC_API_KEY
+cp .env.example .env   # Edit .env with your DASHSCOPE_API_KEY
 
 python agents/s01_agent_loop.py       # Start here
 python agents/s12_worktree_task_isolation.py  # Full progression endpoint
@@ -193,7 +201,7 @@ GitHub: **[shareAI-lab/Kode-cli](https://github.com/shareAI-lab/Kode-cli)**
 
 ### Kode Agent SDK -- Embed Agent Capabilities in Your App
 
-The official Claude Code Agent SDK communicates with a full CLI process under the hood -- each concurrent user means a separate terminal process. Kode SDK is a standalone library with no per-user process overhead, embeddable in backends, browser extensions, embedded devices, or any runtime.
+The Kode Agent SDK is a standalone library with no per-user process overhead, embeddable in backends, browser extensions, embedded devices, or any runtime.
 
 GitHub: **[shareAI-lab/Kode-agent-sdk](https://github.com/shareAI-lab/Kode-agent-sdk)**
 
@@ -201,7 +209,7 @@ GitHub: **[shareAI-lab/Kode-agent-sdk](https://github.com/shareAI-lab/Kode-agent
 
 ## Sister Repo: from *on-demand sessions* to *always-on assistant*
 
-The agent this repo teaches is **use-and-discard** -- open a terminal, give it a task, close when done, next session starts blank. That is the Claude Code model.
+The agent this repo teaches is **use-and-discard** -- open a terminal, give it a task, close when done, next session starts blank. That is the Qwen Code model.
 
 [OpenClaw](https://github.com/openclaw/openclaw) proved another possibility: on top of the same agent core, two mechanisms turn the agent from "poke it to make it move" into "it wakes up every 30 seconds to look for work":
 

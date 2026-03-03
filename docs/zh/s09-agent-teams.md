@@ -1,5 +1,7 @@
 # s09: Agent Teams (智能体团队)
 
+> **注意**: 本文档已更新为 Qwen API (OpenAI 兼容)。原 Claude API 已不再使用。
+
 `s01 > s02 > s03 > s04 > s05 > s06 | s07 > s08 > [ s09 ] s10 > s11 > s12`
 
 > *"任务太大一个人干不完, 要能分给队友"* -- 持久化队友 + JSONL 邮箱。
@@ -93,8 +95,13 @@ def _teammate_loop(self, name, role, prompt):
                 "content": f"<inbox>{inbox}</inbox>"})
             messages.append({"role": "assistant",
                 "content": "Noted inbox messages."})
-        response = client.messages.create(...)
-        if response.stop_reason != "tool_use":
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[{"role": "system", "content": teammate_system_prompt}] + messages,
+            tools=TOOLS,
+        )
+        choice = response.choices[0]
+        if choice.finish_reason != "tool_calls":
             break
         # execute tools, append results...
     self._find_member(name)["status"] = "idle"

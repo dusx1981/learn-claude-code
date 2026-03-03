@@ -61,16 +61,15 @@ TOOL_HANDLERS = {
 3. ループ内で名前によりハンドラをルックアップする。ループ本体はs01から不変。
 
 ```python
-for block in response.content:
-    if block.type == "tool_use":
-        handler = TOOL_HANDLERS.get(block.name)
-        output = handler(**block.input) if handler \
-            else f"Unknown tool: {block.name}"
-        results.append({
-            "type": "tool_result",
-            "tool_use_id": block.id,
-            "content": output,
-        })
+for tool_call in choice.message.tool_calls:
+    handler = TOOL_HANDLERS.get(tool_call.function.name)
+    output = handler(**json.loads(tool_call.function.arguments)) if handler \
+        else f"Unknown tool: {tool_call.function.name}"
+    results.append({
+        "role": "tool",
+        "tool_call_id": tool_call.id,
+        "content": output,
+    })
 ```
 
 ツール追加 = ハンドラ追加 + スキーマ追加。ループは決して変わらない。
@@ -88,7 +87,7 @@ for block in response.content:
 
 ```sh
 cd learn-claude-code
-python agents/s02_tool_use.py
+python agents/s02_tool_calls.py
 ```
 
 1. `Read the file requirements.txt`
