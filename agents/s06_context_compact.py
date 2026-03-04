@@ -46,10 +46,10 @@ load_dotenv(override=True)
 
 WORKDIR = Path.cwd()
 client = OpenAI(
-    api_key=os.getenv("DASH_API_KEY"),
-    base_url=os.getenv("OPENAI_BASE_URL", "https://coding.dashscope.aliyuncs.com/v1")
+    api_key=os.getenv("DASHSCOPE_API_KEY"),
+    base_url=os.getenv("OPENAI_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
 )
-MODEL = os.environ.get("MODEL_ID", "GLM-5")
+MODEL = os.environ.get("MODEL_ID", "qwen-max")
 
 SYSTEM = f"You are a coding agent at {WORKDIR}. Use tools to solve tasks."
 
