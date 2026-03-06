@@ -25,14 +25,24 @@ Key insight: "Fire and forget -- the agent doesn't block while the command runs.
 """
 
 import json
+import logging
 import os
 import subprocess
 import threading
+import time
 import uuid
 from pathlib import Path
 
 from openai import OpenAI
 from dotenv import load_dotenv
+
+# Configure logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s [%(levelname)s] [%(threadName)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 load_dotenv(override=True)
 
@@ -56,37 +66,63 @@ class BackgroundManager:
     def run(self, command: str) -> str:
         """Start a background thread, return task_id immediately."""
         task_id = str(uuid.uuid4())[:8]
+        logger.info(f"[BG:{task_id}] Starting background task")
+        logger.debug(f"[BG:{task_id}] Command: {command[:100]}...")
+        
         self.tasks[task_id] = {"status": "running", "result": None, "command": command}
         thread = threading.Thread(
             target=self._execute, args=(task_id, command), daemon=True
         )
+        thread.name = f"BG-{task_id}"  # Set thread name for logging
+        logger.debug(f"[BG:{task_id}] Spawning thread: {thread.name}")
         thread.start()
+        
+        logger.info(f"[BG:{task_id}] Task started, thread spawned")
         return f"Background task {task_id} started: {command[:80]}"
 
     def _execute(self, task_id: str, command: str):
         """Thread target: run subprocess, capture output, push to queue."""
+        logger.info(f"[BG:{task_id}] Thread started execution")
+        logger.debug(f"[BG:{task_id}] Executing: {command[:100]}...")
+        
         try:
+            start_time = time.time()
             r = subprocess.run(
                 command, shell=True, cwd=WORKDIR,
                 capture_output=True, text=True, timeout=300
             )
+            elapsed = time.time() - start_time
             output = (r.stdout + r.stderr).strip()[:50000]
             status = "completed"
+            logger.info(f"[BG:{task_id}] Command completed in {elapsed:.2f}s")
+            logger.debug(f"[BG:{task_id}] Output length: {len(output)} chars")
+            
         except subprocess.TimeoutExpired:
             output = "Error: Timeout (300s)"
             status = "timeout"
+            logger.warning(f"[BG:{task_id}] Command timed out after 300s")
+            
         except Exception as e:
             output = f"Error: {e}"
             status = "error"
+            logger.error(f"[BG:{task_id}] Command failed: {e}")
+        
+        # Update task status
         self.tasks[task_id]["status"] = status
         self.tasks[task_id]["result"] = output or "(no output)"
+        logger.debug(f"[BG:{task_id}] Task status updated to: {status}")
+        
+        # Add to notification queue
         with self._lock:
+            queue_size_before = len(self._notification_queue)
             self._notification_queue.append({
                 "task_id": task_id,
                 "status": status,
                 "command": command[:80],
                 "result": (output or "(no output)")[:500],
             })
+            queue_size_after = len(self._notification_queue)
+            logger.info(f"[BG:{task_id}] Added to notification queue (size: {queue_size_before} -> {queue_size_after})")
 
     def check(self, task_id: str = None) -> str:
         """Check status of one task or list all."""
@@ -103,9 +139,17 @@ class BackgroundManager:
     def drain_notifications(self) -> list:
         """Return and clear all pending completion notifications."""
         with self._lock:
-            notifs = list(self._notification_queue)
-            self._notification_queue.clear()
-        return notifs
+            notif_count = len(self._notification_queue)
+            
+            if notif_count > 0:
+                logger.info(f"[QUEUE] Draining {notif_count} notification(s)")
+                notifs = list(self._notification_queue)
+                self._notification_queue.clear()
+                logger.debug(f"[QUEUE] Drained notifications: {[n['task_id'] for n in notifs]}")
+                return notifs
+            else:
+                logger.debug("[QUEUE] No notifications to drain")
+                return []
 
 
 BG = BackgroundManager()
@@ -252,25 +296,45 @@ TOOLS = [
 
 
 def agent_loop(messages: list):
+    iteration = 0
+    
     while True:
+        iteration += 1
+        logger.info(f"[LOOP:{iteration}] === Starting iteration {iteration} ===")
+        
         # Drain background notifications and inject as system message before LLM call
+        logger.debug(f"[LOOP:{iteration}] Checking for background notifications...")
         notifs = BG.drain_notifications()
-        if notifs and messages:
+        
+        if notifs:
+            logger.info(f"[LOOP:{iteration}] Processing {len(notifs)} background notification(s)")
             notif_text = "\n".join(
                 f"[bg:{n['task_id']}] {n['status']}: {n['result']}" for n in notifs
             )
             messages.append({"role": "user", "content": f"<background-results>\n{notif_text}\n</background-results>"})
             messages.append({"role": "assistant", "content": "Noted background results."})
+            logger.debug(f"[LOOP:{iteration}] Injected background results into conversation")
+        else:
+            logger.debug(f"[LOOP:{iteration}] No background notifications")
         
         # Prepare messages with system message for OpenAI
         api_messages = [{"role": "system", "content": SYSTEM}] + messages
+        logger.debug(f"[LOOP:{iteration}] Calling LLM with {len(api_messages)} messages")
         
-        response = client.chat.completions.create(
-            model=MODEL,
-            messages=api_messages,
-            tools=TOOLS,
-            max_tokens=8000,
-        )
+        # Time the LLM call
+        llm_start = time.time()
+        try:
+            response = client.chat.completions.create(
+                model=MODEL,
+                messages=api_messages,
+                tools=TOOLS,
+                max_tokens=8000,
+            )
+            llm_elapsed = time.time() - llm_start
+            logger.info(f"[LOOP:{iteration}] LLM call completed in {llm_elapsed:.2f}s")
+        except Exception as e:
+            logger.error(f"[LOOP:{iteration}] LLM call failed: {e}")
+            raise
         
         choice = response.choices[0]
         message_content = choice.message.content if choice.message.content is not None else ""
@@ -279,28 +343,47 @@ def agent_loop(messages: list):
             "content": message_content,
         }
         if choice.message.tool_calls:
+            tool_count = len(choice.message.tool_calls)
+            logger.info(f"[LOOP:{iteration}] LLM requested {tool_count} tool call(s)")
             assistant_message["tool_calls"] = choice.message.tool_calls
+        else:
+            logger.debug(f"[LOOP:{iteration}] LLM returned text response (no tools)")
+        
         messages.append(assistant_message)
 
         if choice.finish_reason != "tool_calls":
+            logger.info(f"[LOOP:{iteration}] Finish reason: {choice.finish_reason} - Exiting loop")
             return
-
+        
+        # Execute tools
         results = []
         tool_calls = choice.message.tool_calls or []
-        for tool_call in tool_calls:
+        
+        for idx, tool_call in enumerate(tool_calls, 1):
             function_name = tool_call.function.name
+            logger.info(f"[LOOP:{iteration}] [TOOL:{idx}/{len(tool_calls)}] Executing: {function_name}")
+            
             handler = TOOL_HANDLERS.get(function_name)
             try:
                 arguments = json.loads(tool_call.function.arguments)
+                logger.debug(f"[LOOP:{iteration}] [TOOL:{idx}] Parameters: {json.dumps(arguments, indent=2)[:200]}")
+                
                 output = handler(**arguments) if handler else f"Unknown tool: {function_name}"
+                logger.info(f"[LOOP:{iteration}] [TOOL:{idx}] {function_name} completed")
+                logger.debug(f"[LOOP:{iteration}] [TOOL:{idx}] Output: {str(output)[:200]}")
+                
             except Exception as e:
                 output = f"Error: {e}"
+                logger.error(f"[LOOP:{iteration}] [TOOL:{idx}] {function_name} failed: {e}")
+            
             print(f"> {function_name}: {str(output)[:200]}")
             results.append({
                 "role": "tool", 
                 "tool_call_id": tool_call.id, 
                 "content": str(output)
             })
+        
+        logger.debug(f"[LOOP:{iteration}] Appending {len(results)} tool result(s) to messages")
         messages.extend(results)
 
 
