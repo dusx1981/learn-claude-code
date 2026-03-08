@@ -44,52 +44,11 @@ Trackers:
 
 #### Shutdown 协议
 
-```mermaid
-sequenceDiagram
-    participant 主管
-    participant 消息总线
-    participant 队友
-    participant 追踪器 as shutdown_requests 字典
-
-    主管->>主管: shutdown_request(队友名)
-    主管->>追踪器: 存储 request_id = pending
-    主管->>消息总线: send(to=队友, type=shutdown_request, request_id)
-    消息总线-->>队友: (异步，通过队友的收件箱文件)
-
-    队友->>消息总线: read_inbox() → 获取 shutdown_request
-    队友->>队友: 决定 approve/reject
-    队友->>追踪器: 更新 request_id = approved/rejected
-    队友->>消息总线: send(to=主管, type=shutdown_response, request_id, approve)
-    消息总线-->>主管: (异步，通过主管的收件箱)
-
-    主管->>消息总线: read_inbox() → 获取 shutdown_response
-    主管->>追踪器: 通过 shutdown_response(request_id) 查询状态
-    主管-->>主管: 继续工作或停止
-```
+![shutdown](../imgs/shutdown.svg)
 
 #### Plan Approval 协议
 
-```mermaid
-sequenceDiagram
-    participant 队友
-    participant 消息总线
-    participant 主管
-    participant 追踪器 as plan_requests 字典
-
-    队友->>队友: plan_approval(计划内容)
-    队友->>追踪器: 存储 request_id = pending, 计划内容
-    队友->>消息总线: send(to=主管, type=plan_approval_response, request_id, 计划内容)
-    消息总线-->>主管: (异步，通过主管的收件箱)
-
-    主管->>消息总线: read_inbox() → 获取 plan_approval_response
-    主管->>主管: 审核计划
-    主管->>追踪器: 更新 request_id = approved/rejected
-    主管->>消息总线: send(to=队友, type=plan_approval_response, request_id, approve, 反馈)
-    消息总线-->>队友: (异步，通过队友的收件箱)
-
-    队友->>消息总线: read_inbox() → 获取审批结果
-    队友->>队友: 继续执行或调整计划
-```
+![shutdown](../imgs/plan.svg)
 
 ## 工作原理
 
@@ -137,54 +96,7 @@ def handle_plan_review(request_id, approve, feedback=""):
 
 整个系统由领导代理、消息总线、队友管理器、文件存储和内存追踪器构成，各组件通过明确定义的接口协作。
 
-```mermaid
-graph TB
-    subgraph 用户
-        U[人类用户]
-    end
-
-    subgraph 主管代理
-        L[主管代理<br/>agent_loop]
-        LH[工具处理器<br/>bash, read_file, ...<br/>shutdown_request, plan_approval]
-    end
-
-    subgraph 消息总线
-        MB[MessageBus<br/>send() / read_inbox() / broadcast()<br/>JSONL文件位于 .team/inbox/]
-    end
-
-    subgraph 队友管理器
-        TM[TeammateManager<br/>spawn() / list_all()<br/>config.json]
-        TT[队友线程]
-    end
-
-    subgraph 文件系统
-        FS[.team/inbox/lead.jsonl<br/>.team/inbox/队友X.jsonl]
-    end
-
-    subgraph 请求追踪器
-        SR[shutdown_requests 字典<br/>request_id → 状态]
-        PR[plan_requests 字典<br/>request_id → 计划 & 状态]
-    end
-
-    U -->|命令行输入| L
-    L -->|调用工具| LH
-    LH -->|读写文件| FS
-    LH -->|发送消息| MB
-    LH -->|管理队友| TM
-    LH -->|查询/更新追踪器| SR
-    LH -->|查询/更新追踪器| PR
-
-    MB -->|写入| FS
-    MB -->|读取| FS
-
-    TM -->|启动线程| TT
-    TT -->|每个队友运行| TA[队友代理<br/>_teammate_loop]
-    TA -->|使用工具| TTools[队友工具集<br/>bash, read_file, ...<br/>shutdown_response, plan_approval]
-    TTools -->|发送消息| MB
-    TTools -->|读取消息| MB
-    TTools -->|更新追踪器| SR
-    TTools -->|更新追踪器| PR
-```
+![shutdown](../imgs/frame.svg)
 
 ## 相对 s09 的变更
 
