@@ -40,140 +40,55 @@ Trackers:
   plan_requests     = {req_id: {from, plan, status}}
 ```
 
-## 可视化流程图
+### 协议交互时序图
 
-### Shutdown Protocol (关机协议)
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant Lead as Lead (领导)
-    participant Bus as MessageBus (消息总线)
-    participant Teammate as Teammate (队友)
-    participant Tracker as shutdown_requests
-
-    Lead->>Tracker: 生成 request_id
-    Tracker-->>Lead: req_id = "abc"
-    Lead->>Bus: send(shutdown_request)
-    Note right of Lead: type: shutdown_request<br/>request_id: "abc"
-    Bus->>Teammate: 投递到 inbox
-    Teammate->>Teammate: 读取 inbox
-    Teammate->>Teammate: 决定: approve/reject
-    
-    alt 批准关机
-        Teammate->>Bus: send(shutdown_response)
-        Note right of Teammate: request_id: "abc"<br/>approve: true
-        Bus->>Lead: 投递到 lead inbox
-        Teammate->>Tracker: status = "approved"
-        Teammate->>Teammate: 收尾工作后退出
-        Lead->>Lead: 确认关机成功
-    else 拒绝关机
-        Teammate->>Bus: send(shutdown_response)
-        Note right of Teammate: request_id: "abc"<br/>approve: false
-        Bus->>Lead: 投递到 lead inbox
-        Teammate->>Tracker: status = "rejected"
-        Teammate->>Teammate: 继续工作
-        Lead->>Lead: 收到拒绝响应
-    end
-```
-
-### Plan Approval Protocol (计划审批协议)
+#### Shutdown 协议
 
 ```mermaid
 sequenceDiagram
-    autonumber
-    participant Teammate as Teammate (队友)
-    participant Bus as MessageBus (消息总线)
-    participant Lead as Lead (领导)
-    participant Tracker as plan_requests
+    participant 主管
+    participant 消息总线
+    participant 队友
+    participant 追踪器 as shutdown_requests 字典
 
-    Teammate->>Tracker: 生成 request_id
-    Tracker-->>Teammate: req_id = "xyz"
-    Teammate->>Bus: send(plan_approval)
-    Note right of Teammate: type: plan_approval_response<br/>request_id: "xyz"<br/>plan: "重构方案..."
-    Bus->>Lead: 投递到 lead inbox
-    Lead->>Lead: 读取 inbox
-    Lead->>Lead: 审查计划内容
-    
-    alt 批准计划
-        Lead->>Tracker: status = "approved"
-        Lead->>Bus: send(plan_approval_response)
-        Note right of Lead: request_id: "xyz"<br/>approve: true<br/>feedback: "可以开始"
-        Bus->>Teammate: 投递到 teammate inbox
-        Teammate->>Teammate: 收到批准, 开始执行
-    else 拒绝计划
-        Lead->>Tracker: status = "rejected"
-        Lead->>Bus: send(plan_approval_response)
-        Note right of Lead: request_id: "xyz"<br/>approve: false<br/>feedback: "风险太高"
-        Bus->>Teammate: 投递到 teammate inbox
-        Teammate->>Teammate: 收到拒绝, 修改或放弃
-    end
+    主管->>主管: shutdown_request(队友名)
+    主管->>追踪器: 存储 request_id = pending
+    主管->>消息总线: send(to=队友, type=shutdown_request, request_id)
+    消息总线-->>队友: (异步，通过队友的收件箱文件)
+
+    队友->>消息总线: read_inbox() → 获取 shutdown_request
+    队友->>队友: 决定 approve/reject
+    队友->>追踪器: 更新 request_id = approved/rejected
+    队友->>消息总线: send(to=主管, type=shutdown_response, request_id, approve)
+    消息总线-->>主管: (异步，通过主管的收件箱)
+
+    主管->>消息总线: read_inbox() → 获取 shutdown_response
+    主管->>追踪器: 通过 shutdown_response(request_id) 查询状态
+    主管-->>主管: 继续工作或停止
 ```
 
-### 共享状态机 (Shared FSM)
+#### Plan Approval 协议
 
 ```mermaid
-stateDiagram-v2
-    [*] --> pending: 创建请求<br/>生成 request_id
-    pending --> approved: approve = true
-    pending --> rejected: approve = false
-    approved --> [*]: 关机/执行计划
-    rejected --> [*]: 继续/修改
-    
-    note right of pending
-        等待响应
-        Trackers 记录状态
-    end note
-    
-    note right of approved
-        Shutdown: 队友收尾退出
-        Plan: 队友开始执行
-    end note
-    
-    note right of rejected
-        Shutdown: 队友继续工作
-        Plan: 队友修改或放弃
-    end note
-```
+sequenceDiagram
+    participant 队友
+    participant 消息总线
+    participant 主管
+    participant 追踪器 as plan_requests 字典
 
-### 请求关联机制
+    队友->>队友: plan_approval(计划内容)
+    队友->>追踪器: 存储 request_id = pending, 计划内容
+    队友->>消息总线: send(to=主管, type=plan_approval_response, request_id, 计划内容)
+    消息总线-->>主管: (异步，通过主管的收件箱)
 
-```mermaid
-flowchart TB
-    subgraph Lead侧
-        L1[handle_shutdown_request] --> L2[生成 request_id]
-        L2 --> L3[记录到 shutdown_requests]
-        L3 --> L4[发送 shutdown_request]
-        
-        L5[handle_plan_review] --> L6[查找 plan_requests]
-        L6 --> L7[更新 status]
-        L7 --> L8[发送 plan_approval_response]
-    end
-    
-    subgraph Teammate侧
-        T1[接收 shutdown_request] --> T2[提取 request_id]
-        T2 --> T3[决定 approve/reject]
-        T3 --> T4[发送 shutdown_response]
-        T4 --> T5[引用同一 request_id]
-        
-        T6[生成计划] --> T7[生成 request_id]
-        T7 --> T8[记录到 plan_requests]
-        T8 --> T9[发送 plan_approval]
-    end
-    
-    subgraph Trackers
-        TR1[shutdown_requests]
-        TR2[plan_requests]
-    end
-    
-    L4 -.->|request_id| T1
-    T5 -.->|request_id| L5
-    T9 -.->|request_id| L6
-    
-    L3 --> TR1
-    T4 --> TR1
-    T8 --> TR2
-    L7 --> TR2
+    主管->>消息总线: read_inbox() → 获取 plan_approval_response
+    主管->>主管: 审核计划
+    主管->>追踪器: 更新 request_id = approved/rejected
+    主管->>消息总线: send(to=队友, type=plan_approval_response, request_id, approve, 反馈)
+    消息总线-->>队友: (异步，通过队友的收件箱)
+
+    队友->>消息总线: read_inbox() → 获取审批结果
+    队友->>队友: 继续执行或调整计划
 ```
 
 ## 工作原理
@@ -217,6 +132,59 @@ def handle_plan_review(request_id, approve, feedback=""):
 ```
 
 一个 FSM, 两种用途。同样的 `pending -> approved | rejected` 状态机可以套用到任何请求-响应协议上。
+
+## 系统架构
+
+整个系统由领导代理、消息总线、队友管理器、文件存储和内存追踪器构成，各组件通过明确定义的接口协作。
+
+```mermaid
+graph TB
+    subgraph 用户
+        U[人类用户]
+    end
+
+    subgraph 主管代理
+        L[主管代理<br/>agent_loop]
+        LH[工具处理器<br/>bash, read_file, ...<br/>shutdown_request, plan_approval]
+    end
+
+    subgraph 消息总线
+        MB[MessageBus<br/>send() / read_inbox() / broadcast()<br/>JSONL文件位于 .team/inbox/]
+    end
+
+    subgraph 队友管理器
+        TM[TeammateManager<br/>spawn() / list_all()<br/>config.json]
+        TT[队友线程]
+    end
+
+    subgraph 文件系统
+        FS[.team/inbox/lead.jsonl<br/>.team/inbox/队友X.jsonl]
+    end
+
+    subgraph 请求追踪器
+        SR[shutdown_requests 字典<br/>request_id → 状态]
+        PR[plan_requests 字典<br/>request_id → 计划 & 状态]
+    end
+
+    U -->|命令行输入| L
+    L -->|调用工具| LH
+    LH -->|读写文件| FS
+    LH -->|发送消息| MB
+    LH -->|管理队友| TM
+    LH -->|查询/更新追踪器| SR
+    LH -->|查询/更新追踪器| PR
+
+    MB -->|写入| FS
+    MB -->|读取| FS
+
+    TM -->|启动线程| TT
+    TT -->|每个队友运行| TA[队友代理<br/>_teammate_loop]
+    TA -->|使用工具| TTools[队友工具集<br/>bash, read_file, ...<br/>shutdown_response, plan_approval]
+    TTools -->|发送消息| MB
+    TTools -->|读取消息| MB
+    TTools -->|更新追踪器| SR
+    TTools -->|更新追踪器| PR
+```
 
 ## 相对 s09 的变更
 
