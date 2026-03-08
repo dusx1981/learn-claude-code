@@ -40,6 +40,142 @@ Trackers:
   plan_requests     = {req_id: {from, plan, status}}
 ```
 
+## 可视化流程图
+
+### Shutdown Protocol (关机协议)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Lead as Lead (领导)
+    participant Bus as MessageBus (消息总线)
+    participant Teammate as Teammate (队友)
+    participant Tracker as shutdown_requests
+
+    Lead->>Tracker: 生成 request_id
+    Tracker-->>Lead: req_id = "abc"
+    Lead->>Bus: send(shutdown_request)
+    Note right of Lead: type: shutdown_request<br/>request_id: "abc"
+    Bus->>Teammate: 投递到 inbox
+    Teammate->>Teammate: 读取 inbox
+    Teammate->>Teammate: 决定: approve/reject
+    
+    alt 批准关机
+        Teammate->>Bus: send(shutdown_response)
+        Note right of Teammate: request_id: "abc"<br/>approve: true
+        Bus->>Lead: 投递到 lead inbox
+        Teammate->>Tracker: status = "approved"
+        Teammate->>Teammate: 收尾工作后退出
+        Lead->>Lead: 确认关机成功
+    else 拒绝关机
+        Teammate->>Bus: send(shutdown_response)
+        Note right of Teammate: request_id: "abc"<br/>approve: false
+        Bus->>Lead: 投递到 lead inbox
+        Teammate->>Tracker: status = "rejected"
+        Teammate->>Teammate: 继续工作
+        Lead->>Lead: 收到拒绝响应
+    end
+```
+
+### Plan Approval Protocol (计划审批协议)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Teammate as Teammate (队友)
+    participant Bus as MessageBus (消息总线)
+    participant Lead as Lead (领导)
+    participant Tracker as plan_requests
+
+    Teammate->>Tracker: 生成 request_id
+    Tracker-->>Teammate: req_id = "xyz"
+    Teammate->>Bus: send(plan_approval)
+    Note right of Teammate: type: plan_approval_response<br/>request_id: "xyz"<br/>plan: "重构方案..."
+    Bus->>Lead: 投递到 lead inbox
+    Lead->>Lead: 读取 inbox
+    Lead->>Lead: 审查计划内容
+    
+    alt 批准计划
+        Lead->>Tracker: status = "approved"
+        Lead->>Bus: send(plan_approval_response)
+        Note right of Lead: request_id: "xyz"<br/>approve: true<br/>feedback: "可以开始"
+        Bus->>Teammate: 投递到 teammate inbox
+        Teammate->>Teammate: 收到批准, 开始执行
+    else 拒绝计划
+        Lead->>Tracker: status = "rejected"
+        Lead->>Bus: send(plan_approval_response)
+        Note right of Lead: request_id: "xyz"<br/>approve: false<br/>feedback: "风险太高"
+        Bus->>Teammate: 投递到 teammate inbox
+        Teammate->>Teammate: 收到拒绝, 修改或放弃
+    end
+```
+
+### 共享状态机 (Shared FSM)
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending: 创建请求<br/>生成 request_id
+    pending --> approved: approve = true
+    pending --> rejected: approve = false
+    approved --> [*]: 关机/执行计划
+    rejected --> [*]: 继续/修改
+    
+    note right of pending
+        等待响应
+        Trackers 记录状态
+    end note
+    
+    note right of approved
+        Shutdown: 队友收尾退出
+        Plan: 队友开始执行
+    end note
+    
+    note right of rejected
+        Shutdown: 队友继续工作
+        Plan: 队友修改或放弃
+    end note
+```
+
+### 请求关联机制
+
+```mermaid
+flowchart TB
+    subgraph Lead侧
+        L1[handle_shutdown_request] --> L2[生成 request_id]
+        L2 --> L3[记录到 shutdown_requests]
+        L3 --> L4[发送 shutdown_request]
+        
+        L5[handle_plan_review] --> L6[查找 plan_requests]
+        L6 --> L7[更新 status]
+        L7 --> L8[发送 plan_approval_response]
+    end
+    
+    subgraph Teammate侧
+        T1[接收 shutdown_request] --> T2[提取 request_id]
+        T2 --> T3[决定 approve/reject]
+        T3 --> T4[发送 shutdown_response]
+        T4 --> T5[引用同一 request_id]
+        
+        T6[生成计划] --> T7[生成 request_id]
+        T7 --> T8[记录到 plan_requests]
+        T8 --> T9[发送 plan_approval]
+    end
+    
+    subgraph Trackers
+        TR1[shutdown_requests]
+        TR2[plan_requests]
+    end
+    
+    L4 -.->|request_id| T1
+    T5 -.->|request_id| L5
+    T9 -.->|request_id| L6
+    
+    L3 --> TR1
+    T4 --> TR1
+    T8 --> TR2
+    L7 --> TR2
+```
+
 ## 工作原理
 
 1. 领导生成 request_id, 通过收件箱发起关机请求。
