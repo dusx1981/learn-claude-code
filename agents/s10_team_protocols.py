@@ -47,6 +47,7 @@ Key insight: "Same request_id correlation pattern, two domains."
 """
 
 import json
+import logging
 import os
 import subprocess
 import threading
@@ -56,6 +57,14 @@ from pathlib import Path
 
 from openai import OpenAI
 from dotenv import load_dotenv
+
+# Configure logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s [%(levelname)s] [%(threadName)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 load_dotenv(override=True)
 
@@ -107,7 +116,9 @@ class MessageBus:
 
     def send(self, sender: str, to: str, content: str,
              msg_type: str = "message", extra: dict = None) -> str:
+        logger.debug(f"[MessageBus] send: {sender} -> {to}, type={msg_type}")
         if msg_type not in VALID_MSG_TYPES:
+            logger.warning(f"[MessageBus] Invalid msg_type '{msg_type}' from {sender}")
             return f"Error: Invalid type '{msg_type}'. Valid: {VALID_MSG_TYPES}"
         msg = {
             "type": msg_type,
@@ -120,17 +131,24 @@ class MessageBus:
         inbox_path = self.dir / f"{to}.jsonl"
         with open(inbox_path, "a") as f:
             f.write(json.dumps(msg) + "\n")
+        logger.info(f"[MessageBus] Message sent: {sender} -> {to}, type={msg_type}")
         return f"Sent {msg_type} to {to}"
 
     def read_inbox(self, name: str) -> list:
         inbox_path = self.dir / f"{name}.jsonl"
         if not inbox_path.exists():
+            logger.debug(f"[MessageBus] Inbox not found: {name}")
             return []
         messages = []
         for line in inbox_path.read_text().strip().splitlines():
             if line:
                 messages.append(json.loads(line))
         inbox_path.write_text("")
+        if messages:
+            logger.info(f"[MessageBus] Read {len(messages)} messages from {name}'s inbox")
+            logger.debug(f"[MessageBus] Message types: {[m.get('type') for m in messages]}")
+        else:
+            logger.debug(f"[MessageBus] Inbox empty: {name}")
         return messages
 
     def broadcast(self, sender: str, content: str, teammates: list) -> str:
@@ -139,6 +157,7 @@ class MessageBus:
             if name != sender:
                 self.send(sender, name, content, "broadcast")
                 count += 1
+        logger.info(f"[MessageBus] Broadcast from {sender} to {count} teammates")
         return f"Broadcast to {count} teammates"
 
 
@@ -169,15 +188,20 @@ class TeammateManager:
         return None
 
     def spawn(self, name: str, role: str, prompt: str) -> str:
+        logger.info(f"[TeammateManager] Spawning teammate: {name}, role={role}")
         member = self._find_member(name)
         if member:
+            logger.debug(f"[TeammateManager] Found existing member: {name}, current status={member.get('status')}")
             if member["status"] not in ("idle", "shutdown"):
+                logger.warning(f"[TeammateManager] Cannot spawn {name}: status={member['status']}")
                 return f"Error: '{name}' is currently {member['status']}"
             member["status"] = "working"
             member["role"] = role
+            logger.info(f"[TeammateManager] Reusing existing member {name}, status->working")
         else:
             member = {"name": name, "role": role, "status": "working"}
             self.config["members"].append(member)
+            logger.info(f"[TeammateManager] Created new member: {name}")
         self._save_config()
         thread = threading.Thread(
             target=self._teammate_loop,
@@ -186,9 +210,11 @@ class TeammateManager:
         )
         self.threads[name] = thread
         thread.start()
+        logger.info(f"[TeammateManager] Thread started for {name}")
         return f"Spawned '{name}' (role: {role})"
 
     def _teammate_loop(self, name: str, role: str, prompt: str):
+        logger.info(f"[{name}] Teammate loop started, role={role}")
         sys_prompt = (
             f"You are '{name}', role: {role}, at {WORKDIR}. "
             f"Submit plans via plan_approval before major work. "
@@ -197,20 +223,28 @@ class TeammateManager:
         messages = [{"role": "user", "content": prompt}]
         tools = self._teammate_tools()
         should_exit = False
+        iteration = 0
         for _ in range(50):
+            iteration += 1
+            logger.debug(f"[{name}] Iteration {iteration}: checking inbox")
             inbox = BUS.read_inbox(name)
             for msg in inbox:
                 messages.append({"role": "user", "content": json.dumps(msg)})
+                logger.debug(f"[{name}] Received message: type={msg.get('type')}, from={msg.get('from')}")
             if should_exit:
+                logger.info(f"[{name}] Exit flag set, breaking loop")
                 break
             try:
+                logger.debug(f"[{name}] Calling LLM, messages count={len(messages)}")
                 response = client.chat.completions.create(
                     model=MODEL,
                     messages=[{"role": "system", "content": sys_prompt}] + messages,
                     tools=tools,
                     max_tokens=8000,
                 )
-            except Exception:
+                logger.debug(f"[{name}] LLM response received, finish_reason={response.choices[0].finish_reason}")
+            except Exception as e:
+                logger.error(f"[{name}] LLM call failed: {e}")
                 break
             choice = response.choices[0]
             assistant_message = {
@@ -221,11 +255,13 @@ class TeammateManager:
                 assistant_message["tool_calls"] = choice.message.tool_calls
             messages.append(assistant_message)
             if choice.finish_reason != "tool_calls":
+                logger.info(f"[{name}] No tool calls, finishing. finish_reason={choice.finish_reason}")
                 break
             results = []
             for tool_call in choice.message.tool_calls:
                 function_name = tool_call.function.name
                 arguments = json.loads(tool_call.function.arguments)
+                logger.info(f"[{name}] Executing tool: {function_name}, args={str(arguments)[:100]}...")
                 output = self._exec(name, function_name, arguments)
                 print(f"  [{name}] {function_name}: {str(output)[:120]}")
                 results.append({
@@ -235,32 +271,44 @@ class TeammateManager:
                 })
                 if function_name == "shutdown_response" and arguments.get("approve"):
                     should_exit = True
+                    logger.info(f"[{name}] Shutdown approved, will exit after this iteration")
             messages.extend(results)
         member = self._find_member(name)
         if member:
-            member["status"] = "shutdown" if should_exit else "idle"
+            final_status = "shutdown" if should_exit else "idle"
+            member["status"] = final_status
             self._save_config()
+            logger.info(f"[{name}] Loop ended, status set to: {final_status}")
 
     def _exec(self, sender: str, tool_name: str, args: dict) -> str:
+        logger.debug(f"[{sender}] Tool execution: {tool_name}")
         # these base tools are unchanged from s02
         if tool_name == "bash":
+            logger.info(f"[{sender}] Executing bash: {args['command'][:80]}...")
             return _run_bash(args["command"])
         if tool_name == "read_file":
+            logger.info(f"[{sender}] Reading file: {args['path']}")
             return _run_read(args["path"])
         if tool_name == "write_file":
+            logger.info(f"[{sender}] Writing file: {args['path']}, size={len(args.get('content', ''))} bytes")
             return _run_write(args["path"], args["content"])
         if tool_name == "edit_file":
+            logger.info(f"[{sender}] Editing file: {args['path']}")
             return _run_edit(args["path"], args["old_text"], args["new_text"])
         if tool_name == "send_message":
+            logger.info(f"[{sender}] Sending message to: {args['to']}, type={args.get('msg_type', 'message')}")
             return BUS.send(sender, args["to"], args["content"], args.get("msg_type", "message"))
         if tool_name == "read_inbox":
+            logger.debug(f"[{sender}] Reading inbox")
             return json.dumps(BUS.read_inbox(sender), indent=2)
         if tool_name == "shutdown_response":
             req_id = args["request_id"]
             approve = args["approve"]
+            logger.info(f"[{sender}] Shutdown response: req_id={req_id}, approve={approve}")
             with _tracker_lock:
                 if req_id in shutdown_requests:
                     shutdown_requests[req_id]["status"] = "approved" if approve else "rejected"
+                    logger.debug(f"[{sender}] Updated shutdown_requests[{req_id}] status to {shutdown_requests[req_id]['status']}")
             BUS.send(
                 sender, "lead", args.get("reason", ""),
                 "shutdown_response", {"request_id": req_id, "approve": approve},
@@ -269,13 +317,16 @@ class TeammateManager:
         if tool_name == "plan_approval":
             plan_text = args.get("plan", "")
             req_id = str(uuid.uuid4())[:8]
+            logger.info(f"[{sender}] Plan approval submitted: req_id={req_id}, plan_length={len(plan_text)}")
             with _tracker_lock:
                 plan_requests[req_id] = {"from": sender, "plan": plan_text, "status": "pending"}
+                logger.debug(f"[{sender}] Created plan_requests[{req_id}]")
             BUS.send(
                 sender, "lead", plan_text, "plan_approval_response",
                 {"request_id": req_id, "plan": plan_text},
             )
             return f"Plan submitted (request_id={req_id}). Waiting for lead approval."
+        logger.warning(f"[{sender}] Unknown tool: {tool_name}")
         return f"Unknown tool: {tool_name}"
 
     def _teammate_tools(self) -> list:
@@ -372,33 +423,44 @@ def _run_edit(path: str, old_text: str, new_text: str) -> str:
 
 # -- Lead-specific protocol handlers --
 def handle_shutdown_request(teammate: str) -> str:
+    logger.info(f"[Lead] Sending shutdown request to: {teammate}")
     req_id = str(uuid.uuid4())[:8]
     with _tracker_lock:
         shutdown_requests[req_id] = {"target": teammate, "status": "pending"}
+        logger.debug(f"[Lead] Created shutdown_requests[{req_id}] for {teammate}")
     BUS.send(
         "lead", teammate, "Please shut down gracefully.",
         "shutdown_request", {"request_id": req_id},
     )
+    logger.info(f"[Lead] Shutdown request sent: req_id={req_id}, target={teammate}")
     return f"Shutdown request {req_id} sent to '{teammate}' (status: pending)"
 
 
 def handle_plan_review(request_id: str, approve: bool, feedback: str = "") -> str:
+    logger.info(f"[Lead] Processing plan review: req_id={request_id}, approve={approve}")
     with _tracker_lock:
         req = plan_requests.get(request_id)
     if not req:
+        logger.warning(f"[Lead] Unknown plan request_id: {request_id}")
         return f"Error: Unknown plan request_id '{request_id}'"
     with _tracker_lock:
         req["status"] = "approved" if approve else "rejected"
+        logger.debug(f"[Lead] Updated plan_requests[{request_id}] status to {req['status']}")
     BUS.send(
         "lead", req["from"], feedback, "plan_approval_response",
         {"request_id": request_id, "approve": approve, "feedback": feedback},
     )
+    logger.info(f"[Lead] Plan {req['status']} for '{req['from']}', req_id={request_id}")
     return f"Plan {req['status']} for '{req['from']}'"
 
 
 def _check_shutdown_status(request_id: str) -> str:
+    logger.debug(f"[Lead] Checking shutdown status: req_id={request_id}")
     with _tracker_lock:
-        return json.dumps(shutdown_requests.get(request_id, {"error": "not found"}))
+        result = shutdown_requests.get(request_id, {"error": "not found"})
+        if "error" not in result:
+            logger.debug(f"[Lead] Shutdown status: {result}")
+        return json.dumps(result)
 
 
 # -- Lead tool dispatch (12 tools) --
@@ -446,9 +508,14 @@ TOOLS = _to_openai_tools([
 
 
 def agent_loop(messages: list):
+    iteration = 0
     while True:
+        iteration += 1
+        logger.debug(f"[Lead] Agent loop iteration {iteration}")
         inbox = BUS.read_inbox("lead")
         if inbox:
+            logger.info(f"[Lead] Received {len(inbox)} messages from inbox")
+            logger.debug(f"[Lead] Inbox message types: {[m.get('type') for m in inbox]}")
             messages.append({
                 "role": "user",
                 "content": f"<inbox>{json.dumps(inbox, indent=2)}</inbox>",
@@ -457,6 +524,7 @@ def agent_loop(messages: list):
                 "role": "assistant",
                 "content": "Noted inbox messages.",
             })
+        logger.debug(f"[Lead] Calling LLM, messages count={len(messages)}")
         response = client.chat.completions.create(
             model=MODEL,
             messages=[{"role": "system", "content": SYSTEM}] + messages,
@@ -464,6 +532,7 @@ def agent_loop(messages: list):
             max_tokens=8000,
         )
         choice = response.choices[0]
+        logger.debug(f"[Lead] LLM response received, finish_reason={choice.finish_reason}")
         assistant_message = {
             "role": "assistant",
             "content": choice.message.content,
@@ -472,15 +541,18 @@ def agent_loop(messages: list):
             assistant_message["tool_calls"] = choice.message.tool_calls
         messages.append(assistant_message)
         if choice.finish_reason != "tool_calls":
+            logger.info(f"[Lead] No tool calls, finishing. finish_reason={choice.finish_reason}")
             return
         results = []
         for tool_call in choice.message.tool_calls:
             function_name = tool_call.function.name
             arguments = json.loads(tool_call.function.arguments)
+            logger.info(f"[Lead] Executing tool: {function_name}")
             handler = TOOL_HANDLERS.get(function_name)
             try:
                 output = handler(**arguments) if handler else f"Unknown tool: {function_name}"
             except Exception as e:
+                logger.error(f"[Lead] Tool execution error: {e}")
                 output = f"Error: {e}"
             print(f"> {function_name}: {str(output)[:200]}")
             results.append({
@@ -492,13 +564,22 @@ def agent_loop(messages: list):
 
 
 if __name__ == "__main__":
+    logger.info("=" * 60)
+    logger.info("s10_team_protocols.py started")
+    logger.info(f"WORKDIR: {WORKDIR}")
+    logger.info(f"TEAM_DIR: {TEAM_DIR}")
+    logger.info(f"MODEL: {MODEL}")
+    logger.info("=" * 60)
+    
     history = []
     while True:
         try:
             query = input("\033[36ms10 >> \033[0m")
         except (EOFError, KeyboardInterrupt):
+            logger.info("Received EOF/KeyboardInterrupt, exiting...")
             break
         if query.strip().lower() in ("q", "exit", ""):
+            logger.info("User exited")
             break
         if query.strip() == "/team":
             print(TEAM.list_all())
@@ -506,6 +587,7 @@ if __name__ == "__main__":
         if query.strip() == "/inbox":
             print(json.dumps(BUS.read_inbox("lead"), indent=2))
             continue
+        logger.info(f"User input: {query[:100]}...")
         history.append({"role": "user", "content": query})
         agent_loop(history)
         response_content = history[-1]["content"]
